@@ -2,10 +2,6 @@
 //! Reads from database file created by person_write_rusqlite example
 
 use sql_lighter::connection::Connection;
-use sql_lighter::executor::VirtualMachine;
-use sql_lighter::parser::Parser;
-use sql_lighter::planner::Planner;
-use sql_lighter::FromValue;
 
 #[derive(Debug)]
 struct Person {
