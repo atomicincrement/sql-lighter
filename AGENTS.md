@@ -44,16 +44,6 @@ With our rust version, We will use the same interface as rusqlite.
 - [x] Add support for basic data types and operations
 - [x] Implement indexing structures
 
-## Phase 5: Performance Optimization
-
-**Objective:** Optimize performance and add extensibility.
-
-- [ ] Profile and optimize hot paths
-- [ ] Implement caching and buffering strategies
-- [ ] Implement plugin system
-- [ ] Add SIMD optimizations where applicable
-- [ ] Performance benchmarking suite
-
 ## Phase 6: Popular Wrapper Implementation
 
 **Objective:** Create ergonomic bindings and wrappers.
@@ -63,3 +53,13 @@ With our rust version, We will use the same interface as rusqlite.
 - [ ] Add async/await support
 - [ ] FFI bindings for C compatibility
 - [ ] Comprehensive documentation and examples
+
+## Phase 5: Performance Optimization
+
+**Objective:** Optimize performance and add extensibility.
+
+- [ ] Profile and optimize hot paths
+- [ ] Implement caching and buffering strategies
+- [ ] Implement plugin system
+- [ ] Add SIMD optimizations where applicable
+- [ ] Performance benchmarking suite
