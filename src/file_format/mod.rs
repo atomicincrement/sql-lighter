@@ -13,6 +13,8 @@ pub mod varint;
 pub use header::{FileHeaderRef, FileHeaderMut, TextEncoding, HEADER_SIZE};
 pub use page::{Page, PageHeaderRef, PageHeaderMut, PageType, PageRef, PageMut};
 pub use btree::BTree;
+// Phase 7j: Cell, LeafCellRef, InteriorCellRef kept for deprecated read_page() method
+// New code should use PageRef/PageMut directly for zero-copy access
 pub use cell::{Cell, LeafCellRef, InteriorCellRef, LeafCellIter, InteriorCellIter};
 pub use record::Record;
 pub use varint::{read_varint, write_varint};

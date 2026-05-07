@@ -12,7 +12,7 @@ use crate::parser::{
 };
 use crate::planner::ExecutionPlan;
 use crate::types::{Row, Value};
-use crate::file_format::{BTree, Cell, Page, PageType, Record};
+use crate::file_format::{Record};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -585,8 +585,6 @@ impl ExpressionEvaluator {
 pub struct TableStorage {
     /// Column schema (names in order)
     pub columns: Vec<String>,
-    /// B-tree for managing pages
-    btree: BTree,
     /// Page number where this table is stored (Phase 7d: zero-copy reference)
     pub page_num: u32,
     /// Pre-serialized cell bytes (Phase 7f: eliminated Cell struct from write path)
@@ -600,7 +598,6 @@ impl TableStorage {
     fn new(columns: Vec<String>) -> Self {
         Self {
             columns,
-            btree: BTree::new(1),
             page_num: 1,
             cells_bytes: Vec::new(),
             next_rowid: 1,
@@ -832,10 +829,8 @@ pub struct IndexStorage {
     column_name: String,
     /// Whether this is a unique index (one rowid per key)
     unique: bool,
-    /// B-tree for managing index pages
-    btree: BTree,
-    /// In-memory page storing index entries
-    page: Page,
+    /// Pre-serialized index cell bytes (Phase 7i: zero-copy, no Cell objects)
+    cells_bytes: Vec<Vec<u8>>,
 }
 
 impl IndexStorage {
@@ -844,66 +839,90 @@ impl IndexStorage {
         Self {
             column_name,
             unique,
-            btree: BTree::new(1),
-            page: Page {
-                page_num: 1,
-                page_type: PageType::IndexLeaf,
-                cells: Vec::new(),
-            },
+            cells_bytes: Vec::new(),
         }
+    }
+
+    /// Parse leaf cell bytes to extract rowid and payload (Phase 7i: on-demand parsing)
+    fn parse_leaf_cell(cell_bytes: &[u8]) -> Result<(u64, &[u8])> {
+        let (payload_len, mut offset) = crate::file_format::read_varint(cell_bytes)?;
+        let (rowid, rowid_len) = crate::file_format::read_varint(&cell_bytes[offset..])?;
+        offset += rowid_len;
+        
+        let payload_end = offset + payload_len as usize;
+        if payload_end > cell_bytes.len() {
+            return Err(Error::ExecutionError("Index cell payload out of bounds".into()));
+        }
+        
+        Ok((rowid, &cell_bytes[offset..payload_end]))
+    }
+
+    /// Serialize a leaf cell directly to bytes (Phase 7i: direct byte writing)
+    fn serialize_leaf_cell(rowid: u64, payload: &[u8]) -> Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+        
+        let payload_varint = crate::file_format::write_varint(payload.len() as u64);
+        buffer.extend_from_slice(&payload_varint);
+        
+        let rowid_varint = crate::file_format::write_varint(rowid);
+        buffer.extend_from_slice(&rowid_varint);
+        
+        buffer.extend_from_slice(payload);
+        
+        Ok(buffer)
     }
 
     /// Add an index entry: (key_value, rowid)
     /// For uniqueness, if this is a unique index and key already exists with different rowid, returns error
     fn insert_entry(&mut self, key: &Value, rowid: u64) -> Result<()> {
         let key_hash = self.hash_value(key);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&key_hash.to_be_bytes());
 
-        // Check if key already exists
-        for cell in &self.page.cells {
-            if cell.get_key() == key_hash {
-                if self.unique {
-                    // For unique index, check if the rowid matches
-                    if let Cell::Leaf { rowid: stored_rowid, payload: _ } = cell {
-                        if *stored_rowid != rowid {
-                            return Err(Error::ExecutionError(
-                                format!("UNIQUE constraint failed for index on {}", self.column_name)
-                            ));
+        // Check if key already exists (Phase 7i: parse bytes on-demand)
+        for cell_bytes in &self.cells_bytes {
+            if let Ok((stored_rowid, stored_payload)) = Self::parse_leaf_cell(cell_bytes) {
+                if stored_payload.len() >= 8 {
+                    let stored_key_hash = u64::from_be_bytes([
+                        stored_payload[0], stored_payload[1], stored_payload[2], stored_payload[3],
+                        stored_payload[4], stored_payload[5], stored_payload[6], stored_payload[7],
+                    ]);
+                    
+                    if stored_key_hash == key_hash {
+                        if self.unique {
+                            if stored_rowid != rowid {
+                                return Err(Error::ExecutionError(
+                                    format!("UNIQUE constraint failed for index on {}", self.column_name)
+                                ));
+                            }
+                            return Ok(()); // Already exists with same rowid
                         }
                     }
-                    return Ok(()); // Already exists with same rowid
                 }
             }
         }
 
-        // For non-unique indices, store multiple rowids with the same key
-        // We use the key_hash as the cell key and encode the rowid in the payload
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&rowid.to_be_bytes());
-
-        let cell = Cell::Leaf {
-            rowid: rowid,  // Use rowid as the cell rowid
-            payload,
-        };
-
-        self.btree.insert(&mut self.page, cell)?;
+        // Serialize leaf cell directly to bytes (Phase 7i: eliminate Cell struct)
+        let cell_bytes = Self::serialize_leaf_cell(rowid, &payload)?;
+        self.cells_bytes.push(cell_bytes);
         Ok(())
     }
 
     /// Remove an index entry: (key_value, rowid)
     fn delete_entry(&mut self, key: &Value, rowid: u64) -> Result<bool> {
-        let mut removed = false;
+        let initial_len = self.cells_bytes.len();
         
-        self.page.cells.retain(|cell| {
-            if let Cell::Leaf { rowid: stored_rowid, payload: _ } = cell {
-                if *stored_rowid == rowid {
-                    removed = true;
+        // Phase 7i: Parse bytes on-demand, filter without Cell objects
+        self.cells_bytes.retain(|cell_bytes| {
+            if let Ok((stored_rowid, _)) = Self::parse_leaf_cell(cell_bytes) {
+                if stored_rowid == rowid {
                     return false; // Remove this entry
                 }
             }
             true
         });
 
-        Ok(removed)
+        Ok(self.cells_bytes.len() < initial_len)
     }
 
     /// Find all rowids with a specific key value
@@ -911,10 +930,18 @@ impl IndexStorage {
         let mut rowids = Vec::new();
         let key_hash = self.hash_value(key);
 
-        for cell in &self.page.cells {
-            if let Cell::Leaf { rowid, payload: _ } = cell {
-                if cell.get_key() == key_hash {
-                    rowids.push(*rowid);
+        // Phase 7i: Parse bytes on-demand without Cell objects
+        for cell_bytes in &self.cells_bytes {
+            if let Ok((rowid, payload)) = Self::parse_leaf_cell(cell_bytes) {
+                if payload.len() >= 8 {
+                    let stored_key_hash = u64::from_be_bytes([
+                        payload[0], payload[1], payload[2], payload[3],
+                        payload[4], payload[5], payload[6], payload[7],
+                    ]);
+                    
+                    if stored_key_hash == key_hash {
+                        rowids.push(rowid);
+                    }
                 }
             }
         }
