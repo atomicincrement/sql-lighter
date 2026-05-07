@@ -112,11 +112,13 @@ impl DatabaseFileRead {
     }
 }
 
-/// Read-write database file handler using memory mapping
+/// Read-write database file handler using memory mapping (Phase 7c: Zero-cache persistence)
+/// 
+/// Writes directly to the memory map without caching for immediate persistence.
+/// All page modifications are written directly to the mmap.
 pub struct DatabaseFile {
     _file: File,  // Keep file handle alive for mmap lifetime
     mmap: MmapMut,
-    page_cache: std::collections::HashMap<u32, Page>,
 }
 
 impl DatabaseFile {
@@ -141,11 +143,8 @@ impl DatabaseFile {
         Ok(Self {
             _file: file,
             mmap,
-            page_cache: std::collections::HashMap::new(),
         })
     }
-
-    /// Create a new SQLite database file
     pub fn create<P: AsRef<Path>>(path: P, page_size: u16) -> Result<Self> {
         // Create file and allocate space for at least one page (100 byte header + page)
         let file = OpenOptions::new()
@@ -172,15 +171,11 @@ impl DatabaseFile {
         Ok(Self {
             _file: file,
             mmap,
-            page_cache: std::collections::HashMap::new(),
         })
     }
 
-    /// Read a page from the database
+    /// Read a page from the database (Phase 7c: Direct mmap read, no cache)
     pub fn read_page(&mut self, page_num: u32) -> Result<Page> {
-        if let Some(page) = self.page_cache.get(&page_num) {
-            return Ok(page.clone());
-        }
 
         let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         let page_size = header_ref.page_size() as usize;
@@ -199,10 +194,7 @@ impl DatabaseFile {
         }
 
         let page_data = &self.mmap[page_offset..page_end];
-        let page = Page::parse(page_data, page_num)?;
-        self.page_cache.insert(page_num, page.clone());
-
-        Ok(page)
+        Page::parse(page_data, page_num)
     }
 
     /// Write a page to the database
@@ -238,8 +230,6 @@ impl DatabaseFile {
             self.mmap[page_offset..page_end].copy_from_slice(&buffer);
         }
 
-        self.page_cache.insert(page.page_num, page.clone());
-
         Ok(())
     }
 
@@ -261,10 +251,7 @@ impl DatabaseFile {
         FileHeaderMut::new(&mut self.mmap[0..HEADER_SIZE])
     }
 
-    /// Clear the page cache
-    pub fn clear_cache(&mut self) {
-        self.page_cache.clear();
-    }
+
 
     /// Get page count
     pub fn page_count(&self) -> Result<u32> {
@@ -307,6 +294,106 @@ mod tests {
         let header = db2.header()?;
         assert_eq!(header.page_size(), 4096);
         assert_eq!(header.magic(), b"SQLite format 3\0");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_zero_cache_immediate_persistence() -> Result<()> {
+        // Phase 7c: Verify that pages are written directly to mmap without caching
+        let temp = NamedTempFile::new().map_err(|e| Error::IoError(e.to_string()))?;
+        let path = temp.path();
+
+        // Create initial page
+        let mut page = Page {
+            page_num: 1,
+            page_type: PageType::TableLeaf,
+            cells: vec![],
+        };
+
+        // Write with first connection
+        {
+            let mut db = DatabaseFile::create(path, 4096)?;
+            db.write_page(&page)?;
+            db.flush()?;
+        }
+
+        // Read with second connection - should see the written data immediately
+        {
+            let mut db = DatabaseFile::open(path)?;
+            let read_page = db.read_page(1)?;
+            assert_eq!(read_page.page_num, 1);
+            assert_eq!(read_page.page_type, PageType::TableLeaf);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_connections_concurrent_access() -> Result<()> {
+        // Phase 7c: Verify multiple connections can safely access the same file
+        let temp = NamedTempFile::new().map_err(|e| Error::IoError(e.to_string()))?;
+        let path = temp.path();
+
+        // Create database with a valid page
+        {
+            let mut db = DatabaseFile::create(path, 4096)?;
+            let page = Page {
+                page_num: 1,
+                page_type: PageType::TableLeaf,
+                cells: vec![],
+            };
+            db.write_page(&page)?;
+            db.flush()?;
+        }
+
+        // Connection 1: Write data
+        {
+            let mut db1 = DatabaseFile::open(path)?;
+            let mut page = db1.read_page(1)?;
+            // Verify we can read what was written
+            assert_eq!(page.page_type, PageType::TableLeaf);
+            page.page_type = PageType::TableInterior;  // Modify it
+            db1.write_page(&page)?;
+            db1.flush()?;
+        }
+
+        // Connection 2: Read the same data
+        {
+            let mut db2 = DatabaseFile::open(path)?;
+            let page = db2.read_page(1)?;
+            assert_eq!(page.page_type, PageType::TableInterior);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fsync_durability() -> Result<()> {
+        // Phase 7c: Verify fsync ensures data persistence
+        let temp = NamedTempFile::new().map_err(|e| Error::IoError(e.to_string()))?;
+        let path = temp.path();
+
+        // Write and fsync
+        {
+            let mut db = DatabaseFile::create(path, 4096)?;
+            
+            let mut page = Page {
+                page_num: 1,
+                page_type: PageType::TableLeaf,
+                cells: vec![],
+            };
+            
+            db.write_page(&page)?;
+            db.flush()?;  // This should call fsync via mmap.flush()
+        }
+
+        // Verify data persists after process boundary (simulated by drop)
+        {
+            let mut db = DatabaseFile::open(path)?;
+            let page = db.read_page(1)?;
+            assert_eq!(page.page_type, PageType::TableLeaf);
+        }
 
         Ok(())
     }

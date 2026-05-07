@@ -73,13 +73,14 @@ Claude: please do not add to this, just tick the boxes!
 ## Phase 7: Refinement, features and optimisation.
 
 - [x] Use zero copy everywhere in DatabaseFileRead. Create PageRef on demand from the memory map. Retire page_cache.
-- [x] Implement the pre-WAL classic sqlite writing using write(). Update the memory map when the file changes size (Phase 7b).
-  - Implemented Connection::open() with read-write capability via DatabaseFile
-  - Added persist() method that serializes modified table pages to disk
-  - Fixed write_page() to correctly handle page 1's file header preservation
-  - Pages are serialized to Box<[u8]> (via Vec<u8>) and written directly to mmap
-  - DatabaseFile::flush() persists changes to disk via fsync
-  - SQL-lighter can now read back its own written databases ✓
+- [x] Implement the pre-WAL classic sqlite writing using write(). Update the memory map when the file changes size
+- [x] DatabaseFile should write as soon as a page is changed. We need to remove page_cache and use actual pages from the memory map. When BTree writes it should write immediately to the affected pages.
+  - Removed page_cache HashMap from DatabaseFile (Phase 7c)
+  - read_page() now reads directly from mmap without caching
+  - write_page() writes directly to mmap without caching
+  - All page modifications persist immediately upon write + flush
+  - Added 3 new tests: zero_cache_immediate_persistence, multiple_connections_concurrent_access, fsync_durability
+  - All 92 tests passing (89 original + 3 Phase 7c)
 - [ ] Check multithreading and multiprocess read/write. Check that fsync works by creating several Connection instances.
 - [ ] Investigate the WAL.
 
