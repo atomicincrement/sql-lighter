@@ -1,6 +1,38 @@
 [package]
 name = "sql-lighter"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+authors = ["Atomic Increment"]
+license = "MIT OR Apache-2.0"
+description = "A high-performance, pure Rust implementation of SQLite"
+repository = "https://github.com/atomicincrement/sql-lighter"
 
 [dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Parsing and serialization
+nom = "7.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging and diagnostics
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Error handling
+thiserror = "1.0"
+
+# Utilities
+bytes = "1.5"
+bitflags = "2.4"
+
+[dev-dependencies]
+criterion = "0.5"
+rand = "0.8"
+proptest = "1.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
