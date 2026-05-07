@@ -23,10 +23,12 @@ use std::path::Path;
 use memmap2::{Mmap, MmapMut};
 
 /// Read-only database file handler using memory mapping
+/// 
+/// Uses zero-copy semantics with PageRef on demand from the memory map.
+/// No caching - each page is parsed directly from the mmap for minimum memory overhead.
 pub struct DatabaseFileRead {
     _file: File,  // Keep file handle alive for mmap lifetime
     mmap: Mmap,
-    page_cache: std::collections::HashMap<u32, Page>,
 }
 
 impl DatabaseFileRead {
@@ -50,16 +52,14 @@ impl DatabaseFileRead {
         Ok(Self {
             _file: file,
             mmap,
-            page_cache: std::collections::HashMap::new(),
         })
     }
 
-    /// Read a page from the database
-    pub fn read_page(&mut self, page_num: u32) -> Result<Page> {
-        if let Some(page) = self.page_cache.get(&page_num) {
-            return Ok(page.clone());
-        }
-
+    /// Create a zero-copy page reference from the memory map
+    /// 
+    /// Returns a PageRef that borrows from the mmap, enabling zero-copy access
+    /// to page data without allocating or caching.
+    pub fn read_page_ref<'a>(&'a self, page_num: u32) -> Result<PageRef<'a>> {
         let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         let page_size = header_ref.page_size() as usize;
 
@@ -77,20 +77,27 @@ impl DatabaseFileRead {
         }
 
         let page_data = &self.mmap[page_offset..page_end];
-        let page = Page::parse(page_data, page_num)?;
-        self.page_cache.insert(page_num, page.clone());
+        PageRef::new(page_data, page_num)
+    }
 
-        Ok(page)
+    /// Read a page from the database into an owned Page
+    /// 
+    /// For convenience, this parses the page data into an owned Page struct.
+    /// For zero-copy access, use read_page_ref() instead.
+    pub fn read_page(&self, page_num: u32) -> Result<Page> {
+        let page_ref = self.read_page_ref(page_num)?;
+        let page_type = page_ref.page_type()?;
+        let cells = page_ref.cells()?;
+        Ok(Page {
+            page_num,
+            page_type,
+            cells,
+        })
     }
 
     /// Get the file header as a reference
     pub fn header(&self) -> Result<FileHeaderRef<'_>> {
         FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])
-    }
-
-    /// Clear the page cache
-    pub fn clear_cache(&mut self) {
-        self.page_cache.clear();
     }
 
     /// Get page count
