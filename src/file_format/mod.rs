@@ -62,13 +62,21 @@ impl DatabaseFileRead {
 
         let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         let page_size = header_ref.page_size() as usize;
-        let offset = (page_num as usize - 1) * page_size;
 
-        if offset + page_size > self.mmap.len() {
+        // For page 1, the B-tree page data starts at byte 100 (after file header)
+        // For other pages, they start at their calculated offset
+        let page_offset = if page_num == 1 {
+            HEADER_SIZE
+        } else {
+            (page_num as usize - 1) * page_size
+        };
+
+        let page_end = page_offset + page_size;
+        if page_end > self.mmap.len() {
             return Err(Error::ParseError("Page offset out of bounds".into()));
         }
 
-        let page_data = &self.mmap[offset..offset + page_size];
+        let page_data = &self.mmap[page_offset..page_end];
         let page = Page::parse(page_data, page_num)?;
         self.page_cache.insert(page_num, page.clone());
 
@@ -169,13 +177,21 @@ impl DatabaseFile {
 
         let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         let page_size = header_ref.page_size() as usize;
-        let offset = (page_num as usize - 1) * page_size;
 
-        if offset + page_size > self.mmap.len() {
+        // For page 1, the B-tree page data starts at byte 100 (after file header)
+        // For other pages, they start at their calculated offset
+        let page_offset = if page_num == 1 {
+            HEADER_SIZE
+        } else {
+            (page_num as usize - 1) * page_size
+        };
+
+        let page_end = page_offset + page_size;
+        if page_end > self.mmap.len() {
             return Err(Error::ParseError("Page offset out of bounds".into()));
         }
 
-        let page_data = &self.mmap[offset..offset + page_size];
+        let page_data = &self.mmap[page_offset..page_end];
         let page = Page::parse(page_data, page_num)?;
         self.page_cache.insert(page_num, page.clone());
 
@@ -186,15 +202,23 @@ impl DatabaseFile {
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
         let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         let page_size = header_ref.page_size() as usize;
-        let offset = (page.page_num as usize - 1) * page_size;
+
+        // For page 1, the B-tree page data starts at byte 100 (after file header)
+        // For other pages, they start at their calculated offset
+        let page_offset = if page.page_num == 1 {
+            HEADER_SIZE
+        } else {
+            (page.page_num as usize - 1) * page_size
+        };
 
         // Ensure mmap is large enough
-        if offset + page_size > self.mmap.len() {
+        let page_end = page_offset + page_size;
+        if page_end > self.mmap.len() {
             return Err(Error::ParseError("Page offset out of bounds".into()));
         }
 
         let buffer = page.serialize(page_size)?;
-        self.mmap[offset..offset + page_size].copy_from_slice(&buffer);
+        self.mmap[page_offset..page_end].copy_from_slice(&buffer);
 
         self.page_cache.insert(page.page_num, page.clone());
 
