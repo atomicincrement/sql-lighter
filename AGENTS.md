@@ -32,13 +32,13 @@ With our rust version, We will use the same interface as rusqlite.
 - [x] Implement SQLite file format writer in Rust
 - [x] Create B-tree implementation for page management
 - [x] Add support for pages, cells, and records
-- [x] Write comprehensive tests for file format operations (22 tests, 100% passing)
+- [x] Write comprehensive tests for file format operations (25 tests, 100% passing)
 
 ## Phase 4: SQL Engine Implementation
 
 **Objective:** Build the SQL parser, planner, and execution engine.
 
-- [ ] Implement SQL lexer and parser
+- [x] Implement SQL lexer and parser
 - [ ] Build query planner and optimizer
 - [ ] Implement execution engine with virtual machine
 - [ ] Add support for basic data types and operations
