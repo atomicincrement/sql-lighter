@@ -8,9 +8,6 @@ pub enum SqlType {
     /// NULL type
     Null,
     
-    /// Boolean (true/false)
-    Boolean,
-    
     /// Integer (8, 16, 32, or 64 bits)
     Integer,
     
@@ -24,30 +21,28 @@ pub enum SqlType {
     Blob,
 }
 
-/// SQL value
+/// SQL value - matches rusqlite::types::Value
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SqlValue {
+pub enum Value {
     Null,
-    Boolean(bool),
     Integer(i64),
     Real(f64),
     Text(String),
     Blob(Vec<u8>),
 }
 
-impl SqlValue {
+impl Value {
     /// Get the type of this value
     pub fn sql_type(&self) -> SqlType {
         match self {
-            SqlValue::Null => SqlType::Null,
-            SqlValue::Boolean(_) => SqlType::Boolean,
-            SqlValue::Integer(_) => SqlType::Integer,
-            SqlValue::Real(_) => SqlType::Real,
-            SqlValue::Text(_) => SqlType::Text,
-            SqlValue::Blob(_) => SqlType::Blob,
+            Value::Null => SqlType::Null,
+            Value::Integer(_) => SqlType::Integer,
+            Value::Real(_) => SqlType::Real,
+            Value::Text(_) => SqlType::Text,
+            Value::Blob(_) => SqlType::Blob,
         }
     }
 }
 
 /// A row of data
-pub type Row = Vec<(String, SqlValue)>;
+pub type Row = Vec<(String, Value)>;

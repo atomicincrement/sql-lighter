@@ -11,7 +11,7 @@ use crate::parser::{
     BinaryOperator, Expression, SortDirection, UnaryOperator,
 };
 use crate::planner::ExecutionPlan;
-use crate::types::{Row, SqlValue};
+use crate::types::{Row, Value};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -127,7 +127,7 @@ pub struct ExpressionEvaluator;
 
 impl ExpressionEvaluator {
     /// Evaluate an expression in the context of a row
-    pub fn eval(expr: &Expression, row: &Row, columns: &[String]) -> Result<SqlValue> {
+    pub fn eval(expr: &Expression, row: &Row, columns: &[String]) -> Result<Value> {
         match expr {
             Expression::Literal(lit) => Self::parse_literal(lit),
 
@@ -198,7 +198,7 @@ impl ExpressionEvaluator {
                 if let Some(else_expr) = else_clause {
                     Self::eval(else_expr, row, columns)
                 } else {
-                    Ok(SqlValue::Null)
+                    Ok(Value::Null)
                 }
             }
 
@@ -207,22 +207,22 @@ impl ExpressionEvaluator {
                 Self::cast_value(&val, type_name)
             }
 
-            Expression::Null => Ok(SqlValue::Null),
-            Expression::True => Ok(SqlValue::Boolean(true)),
-            Expression::False => Ok(SqlValue::Boolean(false)),
+            Expression::Null => Ok(Value::Null),
+            Expression::True => Ok(Value::Integer(1)),
+            Expression::False => Ok(Value::Integer(0)),
         }
     }
 
-    /// Parse a literal string into SqlValue
-    fn parse_literal(lit: &str) -> Result<SqlValue> {
+    /// Parse a literal string into Value
+    fn parse_literal(lit: &str) -> Result<Value> {
         // Try integer
         if let Ok(i) = lit.parse::<i64>() {
-            return Ok(SqlValue::Integer(i));
+            return Ok(Value::Integer(i));
         }
 
         // Try float
         if let Ok(f) = lit.parse::<f64>() {
-            return Ok(SqlValue::Real(f));
+            return Ok(Value::Real(f));
         }
 
         // String literal (remove quotes if present)
@@ -234,101 +234,101 @@ impl ExpressionEvaluator {
             lit.to_string()
         };
 
-        Ok(SqlValue::Text(s))
+        Ok(Value::Text(s))
     }
 
     /// Evaluate binary operation
-    fn eval_binary_op(left: &SqlValue, op: BinaryOperator, right: &SqlValue) -> Result<SqlValue> {
+    fn eval_binary_op(left: &Value, op: BinaryOperator, right: &Value) -> Result<Value> {
         use BinaryOperator::*;
 
         // NULL handling - most operations with NULL result in NULL
-        if matches!(left, SqlValue::Null) || matches!(right, SqlValue::Null) {
+        if matches!(left, Value::Null) || matches!(right, Value::Null) {
             match op {
                 Is => {
                     // Special case: IS NULL / IS NOT NULL
-                    return Ok(SqlValue::Boolean(matches!(left, SqlValue::Null)));
+                    return Ok(Value::Integer(if matches!(left, Value::Null) { 1 } else { 0 }));
                 }
-                _ => return Ok(SqlValue::Null),
+                _ => return Ok(Value::Null),
             }
         }
 
         match (left, right, op) {
             // Arithmetic
-            (SqlValue::Integer(a), SqlValue::Integer(b), Add) => Ok(SqlValue::Integer(a + b)),
-            (SqlValue::Integer(a), SqlValue::Integer(b), Subtract) => {
-                Ok(SqlValue::Integer(a - b))
+            (Value::Integer(a), Value::Integer(b), Add) => Ok(Value::Integer(a + b)),
+            (Value::Integer(a), Value::Integer(b), Subtract) => {
+                Ok(Value::Integer(a - b))
             }
-            (SqlValue::Integer(a), SqlValue::Integer(b), Multiply) => {
-                Ok(SqlValue::Integer(a * b))
+            (Value::Integer(a), Value::Integer(b), Multiply) => {
+                Ok(Value::Integer(a * b))
             }
-            (SqlValue::Integer(a), SqlValue::Integer(b), Divide) => {
+            (Value::Integer(a), Value::Integer(b), Divide) => {
                 if *b == 0 {
-                    Ok(SqlValue::Null)
+                    Ok(Value::Null)
                 } else {
-                    Ok(SqlValue::Integer(a / b))
+                    Ok(Value::Integer(a / b))
                 }
             }
-            (SqlValue::Integer(a), SqlValue::Integer(b), Modulo) => {
+            (Value::Integer(a), Value::Integer(b), Modulo) => {
                 if *b == 0 {
-                    Ok(SqlValue::Null)
+                    Ok(Value::Null)
                 } else {
-                    Ok(SqlValue::Integer(a % b))
+                    Ok(Value::Integer(a % b))
                 }
             }
 
             // String concatenation
-            (SqlValue::Text(a), SqlValue::Text(b), Concatenate) => {
-                Ok(SqlValue::Text(format!("{}{}", a, b)))
+            (Value::Text(a), Value::Text(b), Concatenate) => {
+                Ok(Value::Text(format!("{}{}", a, b)))
             }
 
             // Comparisons
-            (a, b, Equal) => Ok(SqlValue::Boolean(Self::values_equal(a, b)?)),
-            (a, b, NotEqual) => Ok(SqlValue::Boolean(!Self::values_equal(a, b)?)),
+            (a, b, Equal) => Ok(Value::Integer(if Self::values_equal(a, b)? { 1 } else { 0 })),
+            (a, b, NotEqual) => Ok(Value::Integer(if !Self::values_equal(a, b)? { 1 } else { 0 })),
 
             // Relational
-            (a, b, LessThan) => Ok(SqlValue::Boolean(compare_values(a, b) == Ordering::Less)),
+            (a, b, LessThan) => Ok(Value::Integer(if compare_values(a, b) == Ordering::Less { 1 } else { 0 })),
             (a, b, LessThanOrEqual) => {
-                Ok(SqlValue::Boolean(compare_values(a, b) != Ordering::Greater))
+                Ok(Value::Integer(if compare_values(a, b) != Ordering::Greater { 1 } else { 0 }))
             }
             (a, b, GreaterThan) => {
-                Ok(SqlValue::Boolean(compare_values(a, b) == Ordering::Greater))
+                Ok(Value::Integer(if compare_values(a, b) == Ordering::Greater { 1 } else { 0 }))
             }
             (a, b, GreaterThanOrEqual) => {
-                Ok(SqlValue::Boolean(compare_values(a, b) != Ordering::Less))
+                Ok(Value::Integer(if compare_values(a, b) != Ordering::Less { 1 } else { 0 }))
             }
 
             // Logical
-            (a, b, And) => Ok(SqlValue::Boolean(Self::is_truthy(a) && Self::is_truthy(b))),
-            (a, b, Or) => Ok(SqlValue::Boolean(Self::is_truthy(a) || Self::is_truthy(b))),
+            (a, b, And) => Ok(Value::Integer(if Self::is_truthy(a) && Self::is_truthy(b) { 1 } else { 0 })),
+            (a, b, Or) => Ok(Value::Integer(if Self::is_truthy(a) || Self::is_truthy(b) { 1 } else { 0 })),
 
             // Bitwise
-            (SqlValue::Integer(a), SqlValue::Integer(b), BitwiseAnd) => {
-                Ok(SqlValue::Integer(a & b))
+            (Value::Integer(a), Value::Integer(b), BitwiseAnd) => {
+                Ok(Value::Integer(a & b))
             }
-            (SqlValue::Integer(a), SqlValue::Integer(b), BitwiseOr) => {
-                Ok(SqlValue::Integer(a | b))
+            (Value::Integer(a), Value::Integer(b), BitwiseOr) => {
+                Ok(Value::Integer(a | b))
             }
-            (SqlValue::Integer(a), SqlValue::Integer(b), BitwiseXor) => {
-                Ok(SqlValue::Integer(a ^ b))
+            (Value::Integer(a), Value::Integer(b), BitwiseXor) => {
+                Ok(Value::Integer(a ^ b))
             }
-            (SqlValue::Integer(a), SqlValue::Integer(b), BitwiseLeftShift) => {
-                Ok(SqlValue::Integer(a << b))
+            (Value::Integer(a), Value::Integer(b), BitwiseLeftShift) => {
+                Ok(Value::Integer(a << b))
             }
-            (SqlValue::Integer(a), SqlValue::Integer(b), BitwiseRightShift) => {
-                Ok(SqlValue::Integer(a >> b))
+            (Value::Integer(a), Value::Integer(b), BitwiseRightShift) => {
+                Ok(Value::Integer(a >> b))
             }
 
             // SQL-specific: LIKE (case-insensitive pattern matching)
-            (SqlValue::Text(text), SqlValue::Text(pattern), Like) => {
+            (Value::Text(text), Value::Text(pattern), Like) => {
                 let pat = pattern.replace('%', ".*").replace('_', ".");
                 let re = regex::Regex::new(&pat).unwrap_or_else(|_| regex::Regex::new("").unwrap());
-                Ok(SqlValue::Boolean(re.is_match(&text.to_lowercase())))
+                Ok(Value::Integer(if re.is_match(&text.to_lowercase()) { 1 } else { 0 }))
             }
 
             // SQL-specific: IN operator
             (_, _, In) => {
                 // Simplified IN - would need list context
-                Ok(SqlValue::Boolean(false))
+                Ok(Value::Integer(0))
             }
 
             _ => Err(Error::ExecutionError(format!(
@@ -339,44 +339,44 @@ impl ExpressionEvaluator {
     }
 
     /// Evaluate unary operation
-    fn eval_unary_op(op: UnaryOperator, val: &SqlValue) -> Result<SqlValue> {
+    fn eval_unary_op(op: UnaryOperator, val: &Value) -> Result<Value> {
         use UnaryOperator::*;
 
         match (op, val) {
-            (Not, SqlValue::Null) => Ok(SqlValue::Null),
-            (Not, v) => Ok(SqlValue::Boolean(!Self::is_truthy(v))),
+            (Not, Value::Null) => Ok(Value::Null),
+            (Not, v) => Ok(Value::Integer(if Self::is_truthy(v) { 0 } else { 1 })),
 
-            (Minus, SqlValue::Integer(i)) => Ok(SqlValue::Integer(-i)),
-            (Minus, SqlValue::Real(f)) => Ok(SqlValue::Real(-f)),
-            (Minus, SqlValue::Null) => Ok(SqlValue::Null),
+            (Minus, Value::Integer(i)) => Ok(Value::Integer(-i)),
+            (Minus, Value::Real(f)) => Ok(Value::Real(-f)),
+            (Minus, Value::Null) => Ok(Value::Null),
             (Minus, _) => Err(Error::ExecutionError(format!("Cannot negate {:?}", val))),
 
-            (Plus, SqlValue::Integer(i)) => Ok(SqlValue::Integer(*i)),
-            (Plus, SqlValue::Real(f)) => Ok(SqlValue::Real(*f)),
-            (Plus, SqlValue::Null) => Ok(SqlValue::Null),
+            (Plus, Value::Integer(i)) => Ok(Value::Integer(*i)),
+            (Plus, Value::Real(f)) => Ok(Value::Real(*f)),
+            (Plus, Value::Null) => Ok(Value::Null),
             (Plus, _) => Err(Error::ExecutionError(format!("Cannot apply unary plus to {:?}", val))),
 
-            (BitwiseNot, SqlValue::Integer(i)) => Ok(SqlValue::Integer(!i)),
-            (BitwiseNot, SqlValue::Null) => Ok(SqlValue::Null),
+            (BitwiseNot, Value::Integer(i)) => Ok(Value::Integer(!i)),
+            (BitwiseNot, Value::Null) => Ok(Value::Null),
             (BitwiseNot, _) => Err(Error::ExecutionError(format!("Cannot apply bitwise not to {:?}", val))),
 
-            (IsNull, SqlValue::Null) => Ok(SqlValue::Boolean(true)),
-            (IsNull, _) => Ok(SqlValue::Boolean(false)),
+            (IsNull, Value::Null) => Ok(Value::Integer(1)),
+            (IsNull, _) => Ok(Value::Integer(0)),
 
-            (IsNotNull, SqlValue::Null) => Ok(SqlValue::Boolean(false)),
-            (IsNotNull, _) => Ok(SqlValue::Boolean(true)),
+            (IsNotNull, Value::Null) => Ok(Value::Integer(0)),
+            (IsNotNull, _) => Ok(Value::Integer(1)),
 
-            (Isnull, SqlValue::Null) => Ok(SqlValue::Boolean(true)),
-            (Isnull, _) => Ok(SqlValue::Boolean(false)),
+            (Isnull, Value::Null) => Ok(Value::Integer(1)),
+            (Isnull, _) => Ok(Value::Integer(0)),
 
-            (Notnull, SqlValue::Null) => Ok(SqlValue::Boolean(false)),
-            (Notnull, _) => Ok(SqlValue::Boolean(true)),
+            (Notnull, Value::Null) => Ok(Value::Integer(0)),
+            (Notnull, _) => Ok(Value::Integer(1)),
         }
     }
 
     /// Evaluate function call
     /// References: Standard SQL functions - aggregate, string, math, date
-    fn eval_function(name: &str, args: Vec<SqlValue>) -> Result<SqlValue> {
+    fn eval_function(name: &str, args: Vec<Value>) -> Result<Value> {
         match name.to_uppercase().as_str() {
             // String functions
             "LENGTH" | "LEN" => {
@@ -386,8 +386,8 @@ impl ExpressionEvaluator {
                     ));
                 }
                 match &args[0] {
-                    SqlValue::Text(s) => Ok(SqlValue::Integer(s.len() as i64)),
-                    SqlValue::Null => Ok(SqlValue::Null),
+                    Value::Text(s) => Ok(Value::Integer(s.len() as i64)),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(Error::ExecutionError("LENGTH requires text".to_string())),
                 }
             }
@@ -399,8 +399,8 @@ impl ExpressionEvaluator {
                     ));
                 }
                 match &args[0] {
-                    SqlValue::Text(s) => Ok(SqlValue::Text(s.to_uppercase())),
-                    SqlValue::Null => Ok(SqlValue::Null),
+                    Value::Text(s) => Ok(Value::Text(s.to_uppercase())),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(Error::ExecutionError("UPPER requires text".to_string())),
                 }
             }
@@ -412,8 +412,8 @@ impl ExpressionEvaluator {
                     ));
                 }
                 match &args[0] {
-                    SqlValue::Text(s) => Ok(SqlValue::Text(s.to_lowercase())),
-                    SqlValue::Null => Ok(SqlValue::Null),
+                    Value::Text(s) => Ok(Value::Text(s.to_lowercase())),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(Error::ExecutionError("LOWER requires text".to_string())),
                 }
             }
@@ -425,11 +425,11 @@ impl ExpressionEvaluator {
                     ));
                 }
                 match (&args[0], &args[1]) {
-                    (SqlValue::Text(s), SqlValue::Integer(start)) => {
+                    (Value::Text(s), Value::Integer(start)) => {
                         let start = (*start as usize).saturating_sub(1);
                         let substr = if args.len() == 3 {
                             match &args[2] {
-                                SqlValue::Integer(len) => {
+                                Value::Integer(len) => {
                                     let len = *len as usize;
                                     s[start..].chars().take(len).collect::<String>()
                                 }
@@ -440,7 +440,7 @@ impl ExpressionEvaluator {
                         } else {
                             s[start..].to_string()
                         };
-                        Ok(SqlValue::Text(substr))
+                        Ok(Value::Text(substr))
                     }
                     _ => Err(Error::ExecutionError(
                         "SUBSTR requires text and integer".to_string(),
@@ -454,9 +454,9 @@ impl ExpressionEvaluator {
                     return Err(Error::ExecutionError("ABS requires 1 argument".to_string()));
                 }
                 match &args[0] {
-                    SqlValue::Integer(i) => Ok(SqlValue::Integer(i.abs())),
-                    SqlValue::Real(f) => Ok(SqlValue::Real(f.abs())),
-                    SqlValue::Null => Ok(SqlValue::Null),
+                    Value::Integer(i) => Ok(Value::Integer(i.abs())),
+                    Value::Real(f) => Ok(Value::Real(f.abs())),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(Error::ExecutionError("ABS requires number".to_string())),
                 }
             }
@@ -467,7 +467,7 @@ impl ExpressionEvaluator {
                 }
                 let precision = if args.len() == 2 {
                     match &args[1] {
-                        SqlValue::Integer(p) => *p as u32,
+                        Value::Integer(p) => *p as u32,
                         _ => return Err(Error::ExecutionError(
                             "ROUND precision must be integer".to_string(),
                         )),
@@ -477,12 +477,12 @@ impl ExpressionEvaluator {
                 };
 
                 match &args[0] {
-                    SqlValue::Real(f) => {
+                    Value::Real(f) => {
                         let multiplier = 10_f64.powi(precision as i32);
-                        Ok(SqlValue::Real((f * multiplier).round() / multiplier))
+                        Ok(Value::Real((f * multiplier).round() / multiplier))
                     }
-                    SqlValue::Integer(i) => Ok(SqlValue::Integer(*i)),
-                    SqlValue::Null => Ok(SqlValue::Null),
+                    Value::Integer(i) => Ok(Value::Integer(*i)),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(Error::ExecutionError("ROUND requires number".to_string())),
                 }
             }
@@ -493,14 +493,13 @@ impl ExpressionEvaluator {
                     return Err(Error::ExecutionError("TYPEOF requires 1 argument".to_string()));
                 }
                 let type_name = match &args[0] {
-                    SqlValue::Null => "null",
-                    SqlValue::Boolean(_) => "boolean",
-                    SqlValue::Integer(_) => "integer",
-                    SqlValue::Real(_) => "real",
-                    SqlValue::Text(_) => "text",
-                    SqlValue::Blob(_) => "blob",
+                    Value::Null => "null",
+                    Value::Integer(_) => "integer",
+                    Value::Real(_) => "real",
+                    Value::Text(_) => "text",
+                    Value::Blob(_) => "blob",
                 };
-                Ok(SqlValue::Text(type_name.to_string()))
+                Ok(Value::Text(type_name.to_string()))
             }
 
             // Aggregate functions (need context - placeholder)
@@ -516,62 +515,59 @@ impl ExpressionEvaluator {
     }
 
     /// Check if two values are equal
-    fn values_equal(a: &SqlValue, b: &SqlValue) -> Result<bool> {
+    fn values_equal(a: &Value, b: &Value) -> Result<bool> {
         Ok(match (a, b) {
-            (SqlValue::Null, SqlValue::Null) => true,
-            (SqlValue::Null, _) | (_, SqlValue::Null) => false,
-            (SqlValue::Boolean(a), SqlValue::Boolean(b)) => a == b,
-            (SqlValue::Integer(a), SqlValue::Integer(b)) => a == b,
-            (SqlValue::Real(a), SqlValue::Real(b)) => (a - b).abs() < f64::EPSILON,
-            (SqlValue::Integer(a), SqlValue::Real(b)) | (SqlValue::Real(b), SqlValue::Integer(a)) => {
+            (Value::Null, Value::Null) => true,
+            (Value::Null, _) | (_, Value::Null) => false,
+            (Value::Integer(a), Value::Integer(b)) => a == b,
+            (Value::Real(a), Value::Real(b)) => (a - b).abs() < f64::EPSILON,
+            (Value::Integer(a), Value::Real(b)) | (Value::Real(b), Value::Integer(a)) => {
                 (*a as f64 - b).abs() < f64::EPSILON
             }
-            (SqlValue::Text(a), SqlValue::Text(b)) => a == b,
-            (SqlValue::Blob(a), SqlValue::Blob(b)) => a == b,
+            (Value::Text(a), Value::Text(b)) => a == b,
+            (Value::Blob(a), Value::Blob(b)) => a == b,
             _ => false,
         })
     }
 
     /// Check if value is truthy (non-zero, non-null, true)
-    fn is_truthy(val: &SqlValue) -> bool {
+    fn is_truthy(val: &Value) -> bool {
         match val {
-            SqlValue::Null => false,
-            SqlValue::Boolean(b) => *b,
-            SqlValue::Integer(i) => *i != 0,
-            SqlValue::Real(f) => *f != 0.0,
-            SqlValue::Text(s) => !s.is_empty(),
-            SqlValue::Blob(b) => !b.is_empty(),
+            Value::Null => false,
+            Value::Integer(i) => *i != 0,
+            Value::Real(f) => *f != 0.0,
+            Value::Text(s) => !s.is_empty(),
+            Value::Blob(b) => !b.is_empty(),
         }
     }
 
     /// Cast value to target type
-    fn cast_value(val: &SqlValue, target_type: &str) -> Result<SqlValue> {
+    fn cast_value(val: &Value, target_type: &str) -> Result<Value> {
         match target_type.to_uppercase().as_str() {
             "INTEGER" | "INT" => match val {
-                SqlValue::Integer(i) => Ok(SqlValue::Integer(*i)),
-                SqlValue::Real(f) => Ok(SqlValue::Integer(*f as i64)),
-                SqlValue::Text(s) => s.parse::<i64>()
-                    .map(SqlValue::Integer)
-                    .or(Ok(SqlValue::Null)),
-                SqlValue::Null => Ok(SqlValue::Null),
-                _ => Ok(SqlValue::Null),
+                Value::Integer(i) => Ok(Value::Integer(*i)),
+                Value::Real(f) => Ok(Value::Integer(*f as i64)),
+                Value::Text(s) => s.parse::<i64>()
+                    .map(Value::Integer)
+                    .or(Ok(Value::Null)),
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Null),
             },
             "REAL" | "FLOAT" => match val {
-                SqlValue::Real(f) => Ok(SqlValue::Real(*f)),
-                SqlValue::Integer(i) => Ok(SqlValue::Real(*i as f64)),
-                SqlValue::Text(s) => s.parse::<f64>()
-                    .map(SqlValue::Real)
-                    .or(Ok(SqlValue::Null)),
-                SqlValue::Null => Ok(SqlValue::Null),
-                _ => Ok(SqlValue::Null),
+                Value::Real(f) => Ok(Value::Real(*f)),
+                Value::Integer(i) => Ok(Value::Real(*i as f64)),
+                Value::Text(s) => s.parse::<f64>()
+                    .map(Value::Real)
+                    .or(Ok(Value::Null)),
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Null),
             },
             "TEXT" | "VARCHAR" => match val {
-                SqlValue::Text(s) => Ok(SqlValue::Text(s.clone())),
-                SqlValue::Integer(i) => Ok(SqlValue::Text(i.to_string())),
-                SqlValue::Real(f) => Ok(SqlValue::Text(f.to_string())),
-                SqlValue::Boolean(b) => Ok(SqlValue::Text(b.to_string())),
-                SqlValue::Null => Ok(SqlValue::Null),
-                _ => Ok(SqlValue::Null),
+                Value::Text(s) => Ok(Value::Text(s.clone())),
+                Value::Integer(i) => Ok(Value::Text(i.to_string())),
+                Value::Real(f) => Ok(Value::Text(f.to_string())),
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Null),
             },
             "BLOB" => Ok(val.clone()),
             _ => Err(Error::ExecutionError(format!(
@@ -584,6 +580,7 @@ impl ExpressionEvaluator {
 
 /// Virtual machine for executing plans
 /// References: SQLite Virtual Machine operations and semantics
+#[derive(Debug, Clone)]
 pub struct VirtualMachine {
     /// In-memory table storage (table_name -> rows)
     tables: HashMap<String, ResultSet>,
@@ -686,7 +683,7 @@ impl VirtualMachine {
 
                 let limit_count = if let Some(limit_expr) = limit {
                     match ExpressionEvaluator::eval(limit_expr, &empty_row, &empty_columns)? {
-                        SqlValue::Integer(i) => Some(i as usize),
+                        Value::Integer(i) => Some(i as usize),
                         _ => None,
                     }
                 } else {
@@ -695,7 +692,7 @@ impl VirtualMachine {
 
                 let offset_count = if let Some(offset_expr) = offset {
                     match ExpressionEvaluator::eval(offset_expr, &empty_row, &empty_columns)? {
-                        SqlValue::Integer(i) => Some(i as usize),
+                        Value::Integer(i) => Some(i as usize),
                         _ => None,
                     }
                 } else {
@@ -1055,14 +1052,14 @@ impl Default for VirtualMachine {
 
 /// Helper function to compare SQL values
 /// References: Comparison semantics in SQL
-fn compare_values(a: &SqlValue, b: &SqlValue) -> Ordering {
+fn compare_values(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
-        (SqlValue::Null, SqlValue::Null) => Ordering::Equal,
-        (SqlValue::Null, _) => Ordering::Less,
-        (_, SqlValue::Null) => Ordering::Greater,
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Less,
+        (_, Value::Null) => Ordering::Greater,
 
-        (SqlValue::Integer(a), SqlValue::Integer(b)) => a.cmp(b),
-        (SqlValue::Real(a), SqlValue::Real(b)) => {
+        (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
+        (Value::Real(a), Value::Real(b)) => {
             if a < b {
                 Ordering::Less
             } else if a > b {
@@ -1071,7 +1068,7 @@ fn compare_values(a: &SqlValue, b: &SqlValue) -> Ordering {
                 Ordering::Equal
             }
         }
-        (SqlValue::Integer(a), SqlValue::Real(b)) => {
+        (Value::Integer(a), Value::Real(b)) => {
             let a_f = *a as f64;
             if a_f < *b {
                 Ordering::Less
@@ -1081,7 +1078,7 @@ fn compare_values(a: &SqlValue, b: &SqlValue) -> Ordering {
                 Ordering::Equal
             }
         }
-        (SqlValue::Real(a), SqlValue::Integer(b)) => {
+        (Value::Real(a), Value::Integer(b)) => {
             let b_f = *b as f64;
             if a < &b_f {
                 Ordering::Less
@@ -1092,8 +1089,7 @@ fn compare_values(a: &SqlValue, b: &SqlValue) -> Ordering {
             }
         }
 
-        (SqlValue::Text(a), SqlValue::Text(b)) => a.cmp(b),
-        (SqlValue::Boolean(a), SqlValue::Boolean(b)) => a.cmp(b),
+        (Value::Text(a), Value::Text(b)) => a.cmp(b),
 
         _ => Ordering::Equal,
     }
@@ -1109,11 +1105,11 @@ mod tests {
         let cols = vec![];
         assert_eq!(
             ExpressionEvaluator::eval(&Expression::Literal("42"), &row, &cols).unwrap(),
-            SqlValue::Integer(42)
+            Value::Integer(42)
         );
         assert_eq!(
             ExpressionEvaluator::eval(&Expression::Literal("3.14"), &row, &cols).unwrap(),
-            SqlValue::Real(3.14)
+            Value::Real(3.14)
         );
     }
 
@@ -1131,7 +1127,7 @@ mod tests {
         };
 
         let result = ExpressionEvaluator::eval(&add_expr, &row, &cols).unwrap();
-        assert_eq!(result, SqlValue::Integer(15));
+        assert_eq!(result, Value::Integer(15));
     }
 
     #[test]
@@ -1144,16 +1140,16 @@ mod tests {
         };
 
         let result = ExpressionEvaluator::eval(&call, &row, &cols).unwrap();
-        assert_eq!(result, SqlValue::Integer(5));
+        assert_eq!(result, Value::Integer(5));
     }
 
     #[test]
     fn test_result_set_projection() {
         let mut rs = ResultSet::new(vec!["id".to_string(), "name".to_string(), "age".to_string()]);
         rs.add_row(vec![
-            ("id".to_string(), SqlValue::Integer(1)),
-            ("name".to_string(), SqlValue::Text("Alice".to_string())),
-            ("age".to_string(), SqlValue::Integer(30)),
+            ("id".to_string(), Value::Integer(1)),
+            ("name".to_string(), Value::Text("Alice".to_string())),
+            ("age".to_string(), Value::Integer(30)),
         ]);
 
         let projected = rs.project(&["id", "name"]).unwrap();
@@ -1176,11 +1172,11 @@ mod tests {
     #[test]
     fn test_comparison_values() {
         assert_eq!(
-            compare_values(&SqlValue::Integer(5), &SqlValue::Integer(10)),
+            compare_values(&Value::Integer(5), &Value::Integer(10)),
             Ordering::Less
         );
         assert_eq!(
-            compare_values(&SqlValue::Text("a".to_string()), &SqlValue::Text("b".to_string())),
+            compare_values(&Value::Text("a".to_string()), &Value::Text("b".to_string())),
             Ordering::Less
         );
     }
@@ -1189,16 +1185,16 @@ mod tests {
     fn test_distinct_filtering() {
         let mut result = ResultSet::new(vec!["id".to_string(), "name".to_string()]);
         result.add_row(vec![
-            ("id".to_string(), SqlValue::Integer(1)),
-            ("name".to_string(), SqlValue::Text("Alice".to_string())),
+            ("id".to_string(), Value::Integer(1)),
+            ("name".to_string(), Value::Text("Alice".to_string())),
         ]);
         result.add_row(vec![
-            ("id".to_string(), SqlValue::Integer(1)),
-            ("name".to_string(), SqlValue::Text("Alice".to_string())),
+            ("id".to_string(), Value::Integer(1)),
+            ("name".to_string(), Value::Text("Alice".to_string())),
         ]);
         result.add_row(vec![
-            ("id".to_string(), SqlValue::Integer(2)),
-            ("name".to_string(), SqlValue::Text("Bob".to_string())),
+            ("id".to_string(), Value::Integer(2)),
+            ("name".to_string(), Value::Text("Bob".to_string())),
         ]);
 
         let vm = VirtualMachine::new();
@@ -1211,16 +1207,16 @@ mod tests {
     fn test_group_by_basic() {
         let mut result = ResultSet::new(vec!["dept".to_string(), "salary".to_string()]);
         result.add_row(vec![
-            ("dept".to_string(), SqlValue::Text("Sales".to_string())),
-            ("salary".to_string(), SqlValue::Integer(50000)),
+            ("dept".to_string(), Value::Text("Sales".to_string())),
+            ("salary".to_string(), Value::Integer(50000)),
         ]);
         result.add_row(vec![
-            ("dept".to_string(), SqlValue::Text("Sales".to_string())),
-            ("salary".to_string(), SqlValue::Integer(60000)),
+            ("dept".to_string(), Value::Text("Sales".to_string())),
+            ("salary".to_string(), Value::Integer(60000)),
         ]);
         result.add_row(vec![
-            ("dept".to_string(), SqlValue::Text("IT".to_string())),
-            ("salary".to_string(), SqlValue::Integer(70000)),
+            ("dept".to_string(), Value::Text("IT".to_string())),
+            ("salary".to_string(), Value::Integer(70000)),
         ]);
 
         let vm = VirtualMachine::new();

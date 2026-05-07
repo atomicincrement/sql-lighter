@@ -264,7 +264,7 @@ impl<'a> Planner<'a> {
                 })
             }
             Statement::Begin | Statement::Commit | Statement::Rollback => {
-                Err(Error::PlanError(
+                Err(Error::ExecutionError(
                     "Transaction statements require executor support".to_string(),
                 ))
             }
@@ -601,7 +601,7 @@ mod tests {
         // Should produce: Project -> FullTableScan
         match plan {
             ExecutionPlan::Project { .. } => Ok(()),
-            _ => Err(Error::PlanError("Expected project plan".to_string())),
+            _ => Err(Error::ExecutionError("Expected project plan".to_string())),
         }
     }
 
@@ -614,7 +614,7 @@ mod tests {
         // Should produce: Project -> Filter -> FullTableScan
         match plan {
             ExecutionPlan::Project { .. } => Ok(()),
-            _ => Err(Error::PlanError("Expected project plan".to_string())),
+            _ => Err(Error::ExecutionError("Expected project plan".to_string())),
         }
     }
 
@@ -627,7 +627,7 @@ mod tests {
         // Should produce: Project -> Sort -> FullTableScan
         match plan {
             ExecutionPlan::Project { .. } => Ok(()),
-            _ => Err(Error::PlanError("Expected project plan".to_string())),
+            _ => Err(Error::ExecutionError("Expected project plan".to_string())),
         }
     }
 
@@ -642,7 +642,7 @@ mod tests {
                 assert_eq!(table, "users");
                 Ok(())
             }
-            _ => Err(Error::PlanError("Expected insert plan".to_string())),
+            _ => Err(Error::ExecutionError("Expected insert plan".to_string())),
         }
     }
 
@@ -694,11 +694,11 @@ mod tests {
                     input: scan_plan, ..
                 } => match *scan_plan {
                     ExecutionPlan::FullTableScan { .. } => Ok(()),
-                    _ => Err(Error::PlanError("Expected FullTableScan".to_string())),
+                    _ => Err(Error::ExecutionError("Expected FullTableScan".to_string())),
                 },
-                _ => Err(Error::PlanError("Expected GroupBy".to_string())),
+                _ => Err(Error::ExecutionError("Expected GroupBy".to_string())),
             },
-            _ => Err(Error::PlanError("Expected Project".to_string())),
+            _ => Err(Error::ExecutionError("Expected Project".to_string())),
         }
     }
 
@@ -716,11 +716,11 @@ mod tests {
             } => match *distinct_plan {
                 ExecutionPlan::Distinct { input: scan_plan } => match *scan_plan {
                     ExecutionPlan::FullTableScan { .. } => Ok(()),
-                    _ => Err(Error::PlanError("Expected FullTableScan".to_string())),
+                    _ => Err(Error::ExecutionError("Expected FullTableScan".to_string())),
                 },
-                _ => Err(Error::PlanError("Expected Distinct".to_string())),
+                _ => Err(Error::ExecutionError("Expected Distinct".to_string())),
             },
-            _ => Err(Error::PlanError("Expected Project".to_string())),
+            _ => Err(Error::ExecutionError("Expected Project".to_string())),
         }
     }
 
@@ -746,9 +746,9 @@ mod tests {
                     assert_eq!(index, "idx_users_id");
                     Ok(())
                 }
-                _ => Err(Error::PlanError("Expected IndexScan".to_string())),
+                _ => Err(Error::ExecutionError("Expected IndexScan".to_string())),
             },
-            _ => Err(Error::PlanError("Expected Project".to_string())),
+            _ => Err(Error::ExecutionError("Expected Project".to_string())),
         }
     }
 

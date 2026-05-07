@@ -10,8 +10,14 @@ pub mod executor;
 pub mod storage;
 pub mod error;
 pub mod types;
+pub mod connection;
+pub mod params;
+pub mod statement;
 
 pub use error::{Error, Result};
+pub use connection::{Connection, ExecutionResult, Row};
+pub use params::{Params, ToSql};
+pub use statement::{Statement, RowRef, FromValue};
 
 /// Core database engine
 pub struct Database {

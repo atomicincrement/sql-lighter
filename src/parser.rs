@@ -295,6 +295,13 @@ impl<'a> Parser<'a> {
         Ok(Parser { tokens, pos: 0 })
     }
 
+    /// Create a parser from pre-tokenized tokens
+    /// 
+    /// Useful for implementing parameter substitution or custom lexing
+    pub fn new_with_tokens(tokens: Vec<Token<'a>>) -> Result<Self> {
+        Ok(Parser { tokens, pos: 0 })
+    }
+
     /// Parse a single SQL statement
     pub fn parse_statement(&mut self) -> Result<Statement<'a>> {
         self.skip_to_next_token();
