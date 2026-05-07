@@ -72,6 +72,8 @@ Claude: please do not add to this, just tick the boxes!
 
 ## Phase 7: Refinement, features and optimisation.
 
+The goal of this phase is to remove the current Page and Cell data structures and use PageRef instead. If we are going to modify a page, we should iterate through the leaf or intermediate cells of the PageRef and write a new page directly to the file using write() (not via a mutable memory map).
+
 - [x] Use zero copy everywhere in DatabaseFileRead. Create PageRef on demand from the memory map. Retire page_cache.
 - [x] Implement the pre-WAL classic sqlite writing using write(). Update the memory map when the file changes size
 - [x] DatabaseFile should write as soon as a page is changed. We need to remove page_cache and use actual pages from the memory map. When BTree writes it should write immediately to the affected pages.
@@ -81,8 +83,36 @@ Claude: please do not add to this, just tick the boxes!
   - All page modifications persist immediately upon write + flush
   - Added 3 new tests: zero_cache_immediate_persistence, multiple_connections_concurrent_access, fsync_durability
   - All 92 tests passing (89 original + 3 Phase 7c)
+- [ ] Phase 7d: Replace TableStorage.page with PageRef-based reads
+  - Remove Page field from TableStorage struct
+  - Modify load_table_from_page() to work with PageRef instead of owned Page
+  - Update Connection::open() to use PageRef when loading tables
+  - Goal: Zero-copy table reads directly from mmap
+- [ ] Phase 7e: Implement PageMut for write operations
+  - Create PageMut<'a> reference type for mutable page access
+  - Build new pages in PageMut form during INSERT/UPDATE/DELETE
+  - Serialize PageMut directly to bytes without intermediate Page struct
+  - Goal: Zero-copy writes building pages in-place
+- [ ] Phase 7f: Replace Cell serialization with direct byte writing
+  - Remove intermediate Cell enum usage during page writes
+  - Write cell bytes directly to buffer during modification
+  - Serialize page headers and cells in one pass
+  - Goal: Eliminate Cell struct from write path
+- [ ] Phase 7g: Remove Page and Cell data structures entirely
+  - Delete Page struct (no longer needed with PageRef/PageMut)
+  - Delete Cell enum (replaced by direct byte handling)
+  - Update all affected modules (executor, connection, etc.)
+  - Run full test suite to verify
+  - Goal: Pure zero-copy architecture with no intermediate allocations
+- [ ] Phase 7h: Consolidate write operations to direct mmap bytes
+  - Remove write_page() method (obsolete)
+  - All writes use mmap directly with offset calculations
+  - Ensure page 1 header preservation during all writes
+  - Add integration tests for multi-table updates
+  - Goal: Single unified write path with maximum efficiency
 - [ ] Check multithreading and multiprocess read/write. Check that fsync works by creating several Connection instances.
-- [ ] Investigate the WAL.
+- [ ] Investigate the WAL. 
+
 
 
 
