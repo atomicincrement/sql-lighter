@@ -110,6 +110,29 @@ The goal of this phase is to remove the current Page and Cell data structures an
   - Updated all existing tests to use PageMut instead of deprecated write_page()
   - All 93 tests passing (added 1 new multi-table integration test)
   - Single unified write path via mmap with maximum efficiency achieved ✓
+## Phase 7i: Remove Cell from IndexStorage (next)
+
+- [ ] Phase 7i: Replace IndexStorage.page with pre-serialized bytes
+  - Convert IndexStorage from using Page/Cell to cells_bytes: Vec<Vec<u8>>
+  - Update insert_entry() to serialize index entries directly to bytes
+  - Update query_entry() to parse bytes on-demand without Cell objects
+  - Update delete_entry() to work with pre-serialized bytes
+  - Migrate IndexStorage.page: Page to page_num: u32 and cells_bytes: Vec<Vec<u8>>
+  - Goal: IndexStorage now zero-copy like TableStorage (no Cell allocations) ✓
+
+## Phase 7j: Delete Cell struct definition (final step)
+
+- [ ] Phase 7j: Remove Cell enum and related types
+  - Delete Cell enum from cell.rs (no longer used anywhere)
+  - Delete LeafCellRef, InteriorCellRef types (replaced by raw bytes)
+  - Delete LeafCellIter, InteriorCellIter types (replaced by raw bytes)
+  - Remove Cell from file_format mod.rs exports
+  - Remove Cell import from executor.rs
+  - Remove Cell import from page.rs (update cells() method or remove it)
+  - Remove Cell import from btree.rs
+  - Delete cell.rs file entirely (or keep for documentation only)
+  - All 93+ tests passing
+  - Goal: Pure zero-copy architecture with zero Cell allocations ✓
 - [ ] Check multithreading and multiprocess read/write. Check that fsync works by creating several Connection instances.
 - [ ] Investigate the WAL. 
 
