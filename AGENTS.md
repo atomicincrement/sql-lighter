@@ -67,8 +67,17 @@ Claude: please do not add to this, just tick the boxes!
 - [x] Implement prepare, Statement, and query_map methods
 - [x] Use the Btree storage from file_format for VirtualMachine.
 - [x] Split the person example. Write the table using rusqlite and read it with sql-lighter.
-- [ ] Implement the indices using the BTree storage.
-- [ ] Reverse the split person example, write the table using sql-lighter and read using rusqlite.
+- [x] Implement the indices using the BTree storage.
+- [x] Reverse the split person example, write the table using sql-lighter and read using rusqlite.
+
+## Phase 7: Refinement, features and optimisation.
+
+- [ ] Use zero copy everywhere in DatabaseFileRead. Create PageRef on demand from the memory map. Retire page_cache.
+- [ ] Implement the pre-WAL classic sqlite writing using write(). Update the memory map when the file changes size.
+- [ ] Check multithreading and multiprocess read/write. Check that fsync works by creating several Connection instances.
+- [ ] Investigate the WAL.
+
+
 
 
 

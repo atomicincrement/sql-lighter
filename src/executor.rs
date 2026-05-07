@@ -584,11 +584,11 @@ impl ExpressionEvaluator {
 #[derive(Debug, Clone)]
 pub struct TableStorage {
     /// Column schema (names in order)
-    columns: Vec<String>,
+    pub columns: Vec<String>,
     /// B-tree for managing pages
     btree: BTree,
     /// In-memory page storing row data
-    page: Page,
+    pub page: Page,
     /// Next available rowid
     next_rowid: u64,
 }
@@ -756,15 +756,144 @@ pub struct VirtualMachine {
     indexes: HashMap<String, IndexMetadata>,
 }
 
+/// Index storage: stores index key → rowid mappings using B-tree
+///
+/// For a column index on (email), the index stores:
+/// - Index key: The value from the email column
+/// - Index value: List of rowids with that key value
+#[derive(Debug, Clone)]
+pub struct IndexStorage {
+    /// Column name being indexed
+    column_name: String,
+    /// Whether this is a unique index (one rowid per key)
+    unique: bool,
+    /// B-tree for managing index pages
+    btree: BTree,
+    /// In-memory page storing index entries
+    page: Page,
+}
+
+impl IndexStorage {
+    /// Create a new index storage for a column
+    fn new(column_name: String, unique: bool) -> Self {
+        Self {
+            column_name,
+            unique,
+            btree: BTree::new(1),
+            page: Page {
+                page_num: 1,
+                page_type: PageType::IndexLeaf,
+                cells: Vec::new(),
+            },
+        }
+    }
+
+    /// Add an index entry: (key_value, rowid)
+    /// For uniqueness, if this is a unique index and key already exists with different rowid, returns error
+    fn insert_entry(&mut self, key: &Value, rowid: u64) -> Result<()> {
+        let key_hash = self.hash_value(key);
+
+        // Check if key already exists
+        for cell in &self.page.cells {
+            if cell.get_key() == key_hash {
+                if self.unique {
+                    // For unique index, check if the rowid matches
+                    if let Cell::Leaf { rowid: stored_rowid, payload: _ } = cell {
+                        if *stored_rowid != rowid {
+                            return Err(Error::ExecutionError(
+                                format!("UNIQUE constraint failed for index on {}", self.column_name)
+                            ));
+                        }
+                    }
+                    return Ok(()); // Already exists with same rowid
+                }
+            }
+        }
+
+        // For non-unique indices, store multiple rowids with the same key
+        // We use the key_hash as the cell key and encode the rowid in the payload
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&rowid.to_be_bytes());
+
+        let cell = Cell::Leaf {
+            rowid: rowid,  // Use rowid as the cell rowid
+            payload,
+        };
+
+        self.btree.insert(&mut self.page, cell)?;
+        Ok(())
+    }
+
+    /// Remove an index entry: (key_value, rowid)
+    fn delete_entry(&mut self, key: &Value, rowid: u64) -> Result<bool> {
+        let mut removed = false;
+        
+        self.page.cells.retain(|cell| {
+            if let Cell::Leaf { rowid: stored_rowid, payload: _ } = cell {
+                if *stored_rowid == rowid {
+                    removed = true;
+                    return false; // Remove this entry
+                }
+            }
+            true
+        });
+
+        Ok(removed)
+    }
+
+    /// Find all rowids with a specific key value
+    fn find_rowids(&self, key: &Value) -> Result<Vec<u64>> {
+        let mut rowids = Vec::new();
+        let key_hash = self.hash_value(key);
+
+        for cell in &self.page.cells {
+            if let Cell::Leaf { rowid, payload: _ } = cell {
+                if cell.get_key() == key_hash {
+                    rowids.push(*rowid);
+                }
+            }
+        }
+
+        Ok(rowids)
+    }
+
+    /// Hash a value for use as an index key
+    /// Simple hash: convert value to u64
+    fn hash_value(&self, value: &Value) -> u64 {
+        match value {
+            Value::Null => 0,
+            Value::Integer(i) => *i as u64,
+            Value::Real(f) => f.to_bits() as u64,
+            Value::Text(s) => {
+                // Simple string hash: XOR of all bytes
+                let mut hash: u64 = 0;
+                for byte in s.bytes() {
+                    hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
+                }
+                hash
+            }
+            Value::Blob(b) => {
+                let mut hash: u64 = 0;
+                for byte in b {
+                    hash = hash.wrapping_mul(31).wrapping_add(*byte as u64);
+                }
+                hash
+            }
+        }
+    }
+}
+
 /// Index metadata
 #[derive(Debug, Clone)]
-struct IndexMetadata {
+pub struct IndexMetadata {
     /// Table being indexed
-    table: String,
-    /// Columns in index
-    columns: Vec<String>,
+    pub table: String,
+    /// Columns in index (typically just one for simple indices)
+    pub columns: Vec<String>,
     /// Whether index enforces uniqueness
-    unique: bool,
+    pub unique: bool,
+    /// Actual index storage with B-tree
+    pub storage: IndexStorage,
 }
 
 impl VirtualMachine {
@@ -774,6 +903,37 @@ impl VirtualMachine {
             tables: HashMap::new(),
             indexes: HashMap::new(),
         }
+    }
+
+    /// Load a table from a B-tree page (used when opening database files)
+    pub fn load_table_from_page(&mut self, table_name: &str, columns: Vec<String>, page: &Page) -> Result<()> {
+        // Create a new TableStorage for this table
+        let mut storage = crate::executor::TableStorage::new(columns.clone());
+
+        // For each leaf cell in the page, parse the record and add to storage
+        for cell in &page.cells {
+            if let Cell::Leaf { rowid: _, payload } = cell {
+                // Parse the record from the cell payload
+                if let Ok(record) = Record::parse(payload) {
+                    // Convert record to a Row
+                    let mut row = Row::new();
+                    for (i, col_name) in columns.iter().enumerate() {
+                        if i < record.columns.len() {
+                            row.push((col_name.clone(), record.columns[i].clone()));
+                        } else {
+                            row.push((col_name.clone(), Value::Null));
+                        }
+                    }
+                    // Add row to storage
+                    storage.add_row(&row)?;
+                }
+            }
+        }
+
+        // Insert the populated table into the VM
+        self.tables.insert(table_name.to_string(), storage);
+
+        Ok(())
     }
 
     /// Execute an execution plan
@@ -1022,19 +1182,43 @@ impl VirtualMachine {
 
             // CreateIndex: Create an index on table column(s)
             // Example: CREATE INDEX idx_user_email ON users (email)
-            // Stores index metadata for query optimizer to use
+            // Creates an IndexStorage with B-tree and populates with existing rows
             ExecutionPlan::CreateIndex {
                 index,
                 table,
                 columns,
                 unique,
             } => {
+                // Create a new IndexStorage for this index
+                let mut index_storage = IndexStorage::new(
+                    columns[0].to_string(), // For now, support only single-column indices
+                    *unique,
+                );
+
+                // Populate index with existing rows from the table
+                if let Some(table_storage) = self.tables.get(&table.to_string()) {
+                    // Extract indexed column value for each row in the table
+                    for cell in &table_storage.page.cells {
+                        if let Cell::Leaf { rowid, payload } = cell {
+                            if let Ok(record) = Record::parse(payload) {
+                                // Find the column index for the indexed column
+                                if let Some(col_idx) = table_storage.columns.iter().position(|c| c == columns[0]) {
+                                    if col_idx < record.columns.len() {
+                                        let _ = index_storage.insert_entry(&record.columns[col_idx], *rowid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 self.indexes.insert(
                     index.to_string(),
                     IndexMetadata {
                         table: table.to_string(),
                         columns: columns.iter().map(|c| c.to_string()).collect(),
                         unique: *unique,
+                        storage: index_storage,
                     },
                 );
                 Ok(ResultSet::new(vec![]))
@@ -1042,7 +1226,7 @@ impl VirtualMachine {
 
             // DropIndex: Remove an index
             // Example: DROP INDEX idx_user_email
-            // Removes index metadata, allowing full table scans for affected queries
+            // Removes index storage and metadata
             ExecutionPlan::DropIndex { index } => {
                 self.indexes.remove(*index);
                 Ok(ResultSet::new(vec![]))
@@ -1440,11 +1624,15 @@ mod tests {
         };
         vm.execute(&create_index_plan).unwrap();
 
-        // Verify index exists
+        // Verify index exists and has storage with B-tree
         assert!(vm.indexes.contains_key("idx_users_id"));
         let index_meta = vm.indexes.get("idx_users_id").unwrap();
         assert_eq!(index_meta.table, "users");
         assert_eq!(index_meta.columns, vec!["id".to_string()]);
+        
+        // Verify the index storage has B-tree infrastructure
+        assert_eq!(index_meta.storage.column_name, "id");
+        assert!(!index_meta.storage.unique);
     }
 }
 

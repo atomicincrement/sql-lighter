@@ -72,7 +72,8 @@ impl<'a> PageRef<'a> {
         let header_size = header.header_size()?;
 
         // Cell pointers come after the header
-        let cell_pointer_start = if self.page_num == 1 { 100 } else { header_size };
+        // Note: buffer doesn't include file header even for page 1, so always use header_size
+        let cell_pointer_start = header_size;
         let cell_count = header.cell_count();
 
         let mut cells = Vec::new();

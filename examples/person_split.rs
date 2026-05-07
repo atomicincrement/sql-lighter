@@ -13,7 +13,7 @@ struct Person {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = "person_split.db";
+    let db_path = "target/person_split.db";
 
     // ===== PART 1: Write using rusqlite =====
     println!("=== Writing with rusqlite ===");
@@ -51,17 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Reading with sql-lighter ===");
     {
         // Open the file-based database created by rusqlite
+        // The data is automatically loaded from the B-tree storage
         let mut conn = Connection::open(db_path)?;
-
-        // Create schema in sql-lighter (matches what rusqlite created)
-        conn.execute("CREATE TABLE person (id INTEGER, name TEXT, data TEXT)", ())?;
-
-        // For now, we need to re-insert since file loading isn't fully implemented
-        // In a complete implementation, this would read from the persisted file
-        conn.execute(
-            "INSERT INTO person (id, name, data) VALUES (?1, ?2, ?3)",
-            (1i32, "Steven", None::<String>),
-        )?;
 
         // Read and display the person using prepare/query_map
         let stmt = conn.prepare("SELECT id, name, data FROM person")?;
