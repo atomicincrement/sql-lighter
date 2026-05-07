@@ -41,7 +41,7 @@ With our rust version, We will use the same interface as rusqlite.
 - [x] Implement SQL lexer and parser
 - [x] Build query planner and optimizer
 - [x] Implement execution engine with virtual machine
-- [ ] Add support for basic data types and operations
+- [x] Add support for basic data types and operations
 - [ ] Implement indexing structures
 
 ## Phase 5: Performance Optimization

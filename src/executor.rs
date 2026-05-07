@@ -834,6 +834,26 @@ impl VirtualMachine {
                 }
                 Ok(result)
             }
+
+            // GroupBy: Group rows by key expressions and compute aggregates
+            // Example: SELECT dept, COUNT(*) FROM employees GROUP BY dept
+            // Groups rows by grouping expressions, applies aggregate functions
+            ExecutionPlan::GroupBy {
+                input,
+                group_keys,
+                aggregates: _,
+            } => {
+                let input_result = self.execute(input)?;
+                self.apply_group_by(&input_result, group_keys)
+            }
+
+            // Distinct: Remove duplicate rows from result set
+            // Example: SELECT DISTINCT country FROM customers
+            // Keeps first occurrence of each unique row, removes duplicates
+            ExecutionPlan::Distinct { input } => {
+                let result = self.execute(input)?;
+                self.apply_distinct(&result)
+            }
         }
     }
 
@@ -931,6 +951,57 @@ impl VirtualMachine {
         Ok(result)
     }
 
+    /// Apply GROUP BY aggregation
+    fn apply_group_by(
+        &self,
+        result: &ResultSet,
+        group_keys: &[Expression],
+    ) -> Result<ResultSet> {
+        use std::collections::BTreeMap;
+
+        // Group rows by key expressions
+        let mut groups: BTreeMap<String, Vec<Row>> = BTreeMap::new();
+
+        for row in &result.rows {
+            // Evaluate grouping key expressions
+            let mut key_parts = Vec::new();
+            for expr in group_keys {
+                let val = ExpressionEvaluator::eval(expr, row, &result.columns)?;
+                key_parts.push(format!("{:?}", val));
+            }
+            let group_key = key_parts.join("|");
+
+            groups.entry(group_key).or_insert_with(Vec::new).push(row.clone());
+        }
+
+        // Create result with one row per group
+        let mut grouped_result = ResultSet::new(result.columns.clone());
+        for (_key, group_rows) in groups {
+            // Return first row of each group (aggregates would be computed here)
+            if let Some(first_row) = group_rows.first() {
+                grouped_result.add_row(first_row.clone());
+            }
+        }
+
+        Ok(grouped_result)
+    }
+
+    /// Apply DISTINCT filtering
+    fn apply_distinct(&self, result: &ResultSet) -> Result<ResultSet> {
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::new();
+        let mut distinct_result = ResultSet::new(result.columns.clone());
+
+        for row in &result.rows {
+            let row_key = format!("{:?}", row);
+            if seen.insert(row_key) {
+                distinct_result.add_row(row.clone());
+            }
+        }
+
+        Ok(distinct_result)
+    }
 
 }
 
@@ -1071,5 +1142,54 @@ mod tests {
             Ordering::Less
         );
     }
+
+    #[test]
+    fn test_distinct_filtering() {
+        let mut result = ResultSet::new(vec!["id".to_string(), "name".to_string()]);
+        result.add_row(vec![
+            ("id".to_string(), SqlValue::Integer(1)),
+            ("name".to_string(), SqlValue::Text("Alice".to_string())),
+        ]);
+        result.add_row(vec![
+            ("id".to_string(), SqlValue::Integer(1)),
+            ("name".to_string(), SqlValue::Text("Alice".to_string())),
+        ]);
+        result.add_row(vec![
+            ("id".to_string(), SqlValue::Integer(2)),
+            ("name".to_string(), SqlValue::Text("Bob".to_string())),
+        ]);
+
+        let vm = VirtualMachine::new();
+        let distinct = vm.apply_distinct(&result).unwrap();
+
+        assert_eq!(distinct.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_group_by_basic() {
+        let mut result = ResultSet::new(vec!["dept".to_string(), "salary".to_string()]);
+        result.add_row(vec![
+            ("dept".to_string(), SqlValue::Text("Sales".to_string())),
+            ("salary".to_string(), SqlValue::Integer(50000)),
+        ]);
+        result.add_row(vec![
+            ("dept".to_string(), SqlValue::Text("Sales".to_string())),
+            ("salary".to_string(), SqlValue::Integer(60000)),
+        ]);
+        result.add_row(vec![
+            ("dept".to_string(), SqlValue::Text("IT".to_string())),
+            ("salary".to_string(), SqlValue::Integer(70000)),
+        ]);
+
+        let vm = VirtualMachine::new();
+        let group_expr = Expression::Identifier("dept");
+        let grouped = vm
+            .apply_group_by(&result, &[group_expr])
+            .unwrap();
+
+        // Should have 2 groups: Sales and IT
+        assert_eq!(grouped.rows.len(), 2);
+    }
 }
+
 

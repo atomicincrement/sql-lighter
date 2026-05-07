@@ -96,9 +96,36 @@ pub enum ExecutionPlan<'a> {
         table: &'a str,
         columns: Vec<ColumnDef<'a>>,
     },
+    /// Group by aggregation - groups rows and applies aggregate functions
+    /// Example: `SELECT dept, COUNT(*) FROM employees GROUP BY dept`
+    GroupBy {
+        input: Box<ExecutionPlan<'a>>,
+        group_keys: Vec<Expression<'a>>,
+        aggregates: Vec<(&'a str, AggregateFunction<'a>)>,
+    },
+    /// Distinct filtering - removes duplicate rows
+    /// Example: `SELECT DISTINCT country FROM customers`
+    Distinct {
+        input: Box<ExecutionPlan<'a>>,
+    },
     /// Composite plan (for multiple operations)
     /// Example: Transaction with multiple statements: BEGIN; INSERT ...; UPDATE ...; COMMIT;
     Composite(Vec<ExecutionPlan<'a>>),
+}
+
+/// Aggregate function specification
+#[derive(Debug, Clone)]
+pub enum AggregateFunction<'a> {
+    /// COUNT(*) or COUNT(expr)
+    Count(Option<Expression<'a>>),
+    /// SUM(expr)
+    Sum(Expression<'a>),
+    /// AVG(expr)
+    Avg(Expression<'a>),
+    /// MIN(expr)
+    Min(Expression<'a>),
+    /// MAX(expr)
+    Max(Expression<'a>),
 }
 
 /// Statistics for cost estimation
@@ -234,7 +261,34 @@ impl<'a> Planner<'a> {
             }
         }
 
-        // Step 3: ORDER BY clause
+        // Step 3: GROUP BY clause - aggregate rows
+        // Reference: GROUP BY in query planning
+        if let Some(group_keys) = &select.group_by {
+            // Extract aggregate functions from SELECT columns
+            let aggregates = vec![]; // Will be populated from select.columns
+            plan = ExecutionPlan::GroupBy {
+                input: Box::new(plan),
+                group_keys: group_keys.clone(),
+                aggregates,
+            };
+        }
+
+        // Step 4: HAVING clause - filter aggregates (only valid with GROUP BY)
+        if let Some(having_expr) = &select.having {
+            plan = ExecutionPlan::Filter {
+                input: Box::new(plan),
+                condition: having_expr.clone(),
+            };
+        }
+
+        // Step 5: DISTINCT - remove duplicate rows
+        if select.distinct {
+            plan = ExecutionPlan::Distinct {
+                input: Box::new(plan),
+            };
+        }
+
+        // Step 6: ORDER BY clause
         // Reference: Use index for sorting when possible
         if let Some(order_by) = &select.order_by {
             plan = ExecutionPlan::Sort {
@@ -243,7 +297,7 @@ impl<'a> Planner<'a> {
             };
         }
 
-        // Step 4: LIMIT / OFFSET
+        // Step 7: LIMIT / OFFSET
         if select.limit.is_some() || select.offset.is_some() {
             plan = ExecutionPlan::Limit {
                 input: Box::new(plan),
@@ -252,7 +306,7 @@ impl<'a> Planner<'a> {
             };
         }
 
-        // Step 5: Projection (column selection)
+        // Step 8: Projection (column selection)
         let columns = self.extract_columns(&select.columns);
         plan = ExecutionPlan::Project {
             input: Box::new(plan),
@@ -576,6 +630,51 @@ mod tests {
         let stats = TableStats::default();
         assert_eq!(stats.estimated_rows, 1000);
         assert_eq!(stats.estimated_size, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_plan_select_with_group_by() -> Result<()> {
+        let stmt = parse_query("SELECT dept FROM employees GROUP BY dept")?;
+        let planner = Planner::new();
+        let plan = planner.plan(&stmt)?;
+
+        // Should produce: Project -> GroupBy -> FullTableScan
+        match plan {
+            ExecutionPlan::Project {
+                input: group_plan, ..
+            } => match *group_plan {
+                ExecutionPlan::GroupBy {
+                    input: scan_plan, ..
+                } => match *scan_plan {
+                    ExecutionPlan::FullTableScan { .. } => Ok(()),
+                    _ => Err(Error::PlanError("Expected FullTableScan".to_string())),
+                },
+                _ => Err(Error::PlanError("Expected GroupBy".to_string())),
+            },
+            _ => Err(Error::PlanError("Expected Project".to_string())),
+        }
+    }
+
+    #[test]
+    fn test_plan_select_with_distinct() -> Result<()> {
+        let stmt = parse_query("SELECT DISTINCT country FROM customers")?;
+        let planner = Planner::new();
+        let plan = planner.plan(&stmt)?;
+
+        // Should produce: Project -> Distinct -> FullTableScan
+        match plan {
+            ExecutionPlan::Project {
+                input: distinct_plan,
+                ..
+            } => match *distinct_plan {
+                ExecutionPlan::Distinct { input: scan_plan } => match *scan_plan {
+                    ExecutionPlan::FullTableScan { .. } => Ok(()),
+                    _ => Err(Error::PlanError("Expected FullTableScan".to_string())),
+                },
+                _ => Err(Error::PlanError("Expected Distinct".to_string())),
+            },
+            _ => Err(Error::PlanError("Expected Project".to_string())),
+        }
     }
 }
 

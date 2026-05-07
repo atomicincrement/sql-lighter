@@ -38,6 +38,10 @@ pub struct SelectStatement<'a> {
     pub from: Option<TableOrSubquery<'a>>,
     /// WHERE clause
     pub where_clause: Option<Expression<'a>>,
+    /// GROUP BY clause
+    pub group_by: Option<Vec<Expression<'a>>>,
+    /// HAVING clause (post-aggregate filter)
+    pub having: Option<Expression<'a>>,
     /// ORDER BY clause
     pub order_by: Option<Vec<OrderingTerm<'a>>>,
     /// LIMIT clause
@@ -366,6 +370,33 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Parse GROUP BY clause
+        let group_by = if self.match_keyword("GROUP") {
+            self.advance();
+            self.expect_keyword("BY")?;
+            let mut grouping_exprs = Vec::new();
+            loop {
+                self.skip_to_next_token();
+                grouping_exprs.push(self.parse_expression()?);
+                self.skip_to_next_token();
+                if !self.match_punctuation(",") {
+                    break;
+                }
+                self.advance();
+            }
+            Some(grouping_exprs)
+        } else {
+            None
+        };
+
+        // Parse HAVING clause
+        let having = if self.match_keyword("HAVING") {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+
         // Parse ORDER BY clause
         let order_by = if self.match_keyword("ORDER") {
             self.advance();
@@ -395,6 +426,8 @@ impl<'a> Parser<'a> {
             columns,
             from,
             where_clause,
+            group_by,
+            having,
             order_by,
             limit,
             offset,
