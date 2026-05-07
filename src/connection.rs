@@ -1,40 +1,47 @@
-//! Connection wrapper - rusqlite-compatible API (Phase 6a/6b)
+//! Connection wrapper - rusqlite-compatible API (Phase 6a/6b/Phase 7b)
 //!
 //! Provides high-level database connection interface matching rusqlite patterns.
+//! Supports both in-memory and persistent file-based database storage.
 //! References: https://github.com/rusqlite/rusqlite
 
 use crate::error::{Error, Result};
 use crate::executor::VirtualMachine;
 use crate::parser::Parser;
-use crate::planner::Planner;
+use crate::planner::{Planner, ExecutionPlan};
 use crate::types::Value;
 use crate::params::Params;
-use crate::file_format::{DatabaseFileRead, Record, Cell};
+use crate::file_format::DatabaseFile;
 use std::collections::HashMap;
 
 /// Database connection - main API entry point
 /// 
-/// Provides rusqlite-compatible interface for SQL execution
+/// Provides rusqlite-compatible interface for SQL execution with optional file persistence.
 /// References: https://github.com/rusqlite/rusqlite/blob/master/src/lib.rs
-#[derive(Debug, Clone)]
 pub struct Connection {
     /// Virtual machine for query execution
     vm: VirtualMachine,
     /// Whether connection is in-memory only
     in_memory: bool,
+    /// File-based database handle (None for in-memory databases)
+    db_file: Option<DatabaseFile>,
+    /// Path to database file (None for in-memory databases)
+    path: Option<String>,
 }
 
 impl Connection {
-    /// Open a connection to a database file
+    /// Open a connection to a database file for reading and writing
     ///
     /// Loads the database structure from the SQLite file using B-tree storage.
+    /// Changes are persistent and will be written back to the file.
     ///
     /// # Example
     /// ```ignore
-    /// let conn = Connection::open("database.db")?;
+    /// let mut conn = Connection::open("database.db")?;
+    /// conn.execute("INSERT INTO person VALUES (?1, ?2, ?3)", (42, "Alice", "data"))?;
+    /// conn.close()?;  // or changes persist when dropped
     /// ```
     pub fn open(path: &str) -> Result<Self> {
-        let mut db_file = DatabaseFileRead::open(path)?;
+        let mut db_file = DatabaseFile::open(path)?;
         let mut vm = VirtualMachine::new();
 
         // Try loading from pages sequentially until we find table data
@@ -46,7 +53,7 @@ impl Connection {
                         // Try to load this page as the person table
                         // We'll create a "person" table with 3 columns: id, name, data
                         // This is a simplification - ideally we'd read the schema from sqlite_master
-                        if let Err(e) = vm.load_table_from_page(
+                        if let Err(_e) = vm.load_table_from_page(
                             "person",
                             vec!["id".to_string(), "name".to_string(), "data".to_string()],
                             &page,
@@ -66,6 +73,8 @@ impl Connection {
         Ok(Self {
             vm,
             in_memory: false,
+            db_file: Some(db_file),
+            path: Some(path.to_string()),
         })
     }
 
@@ -77,13 +86,15 @@ impl Connection {
     ///
     /// # Example
     /// ```ignore
-    /// let conn = Connection::open_in_memory()?;
+    /// let mut conn = Connection::open_in_memory()?;
     /// conn.execute("CREATE TABLE users (id INTEGER, name TEXT)")?;
     /// ```
     pub fn open_in_memory() -> Result<Self> {
         Ok(Self {
             vm: VirtualMachine::new(),
             in_memory: true,
+            db_file: None,
+            path: None,
         })
     }
 
@@ -94,6 +105,9 @@ impl Connection {
     /// This method accepts anything implementing the Params trait, allowing for
     /// ergonomic parameter binding with tuples, arrays, and slices.
     ///
+    /// For file-based connections, write operations (INSERT, UPDATE, DELETE, CREATE TABLE, CREATE INDEX)
+    /// are automatically persisted to disk.
+    ///
     /// # Arguments
     /// * `sql` - SQL statement with ?1, ?2, etc. placeholders
     /// * `params` - Parameters implementing the Params trait
@@ -103,6 +117,7 @@ impl Connection {
     ///
     /// # Example
     /// ```ignore
+    /// let mut conn = Connection::open("database.db")?;
     /// conn.execute("INSERT INTO users VALUES (?1, ?2)", ("Alice", 30))?;
     /// conn.execute("SELECT * FROM users WHERE id IN (?1, ?2, ?3)", [1, 2, 3])?;
     /// conn.execute("CREATE TABLE users (id INTEGER, name TEXT)", ())?;
@@ -122,13 +137,60 @@ impl Connection {
         let planner = Planner::new();
         let plan = planner.plan(&stmt)?;
 
+        // Check if this is a write operation
+        let is_write = self.is_write_operation(&plan);
+
         // Execute
         let result_set = self.vm.execute(&plan)?;
+
+        // Persist changes to file if this was a write operation
+        if is_write && !self.in_memory {
+            self.persist()?;
+        }
 
         Ok(ExecutionResult {
             rows: result_set.rows.clone(),
             columns: result_set.columns.clone(),
         })
+    }
+
+    /// Check if an execution plan modifies data
+    fn is_write_operation(&self, plan: &ExecutionPlan) -> bool {
+        matches!(
+            plan,
+            ExecutionPlan::Insert { .. }
+                | ExecutionPlan::Update { .. }
+                | ExecutionPlan::Delete { .. }
+                | ExecutionPlan::CreateTable { .. }
+                | ExecutionPlan::CreateIndex { .. }
+                | ExecutionPlan::DropIndex { .. }
+        )
+    }
+
+    /// Persist all modified tables to disk (Phase 7b)
+    ///
+    /// Serializes all modified table pages and writes them to the database file.
+    /// Creates page byte buffers and writes them directly via write_page().
+    fn persist(&mut self) -> Result<()> {
+        if let Some(db_file) = self.db_file.as_mut() {
+            // Get all tables from the virtual machine
+            let tables = self.vm.get_all_tables();
+
+            // Write each table's page to disk
+            for (_table_name, table_storage) in tables {
+                let page = &table_storage.page;
+
+                // Write the page to disk (DatabaseFile::write_page handles file header preservation)
+                db_file.write_page(page)?;
+            }
+
+            // Flush changes to disk immediately
+            db_file.flush()?;
+
+            Ok(())
+        } else {
+            Ok(())
+        }
     }
 
     /// Execute a query and return rows

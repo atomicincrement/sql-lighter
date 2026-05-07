@@ -212,20 +212,31 @@ impl DatabaseFile {
 
         // For page 1, the B-tree page data starts at byte 100 (after file header)
         // For other pages, they start at their calculated offset
-        let page_offset = if page.page_num == 1 {
-            HEADER_SIZE
+        let (page_offset, write_size) = if page.page_num == 1 {
+            // Page 1: starts at offset 100, and only the page portion (not file header)
+            (HEADER_SIZE, page_size - HEADER_SIZE)
         } else {
-            (page.page_num as usize - 1) * page_size
+            // Other pages: start at standard offset, full page size
+            ((page.page_num as usize - 1) * page_size, page_size)
         };
 
         // Ensure mmap is large enough
-        let page_end = page_offset + page_size;
+        let page_end = page_offset + write_size;
         if page_end > self.mmap.len() {
             return Err(Error::ParseError("Page offset out of bounds".into()));
         }
 
         let buffer = page.serialize(page_size)?;
-        self.mmap[page_offset..page_end].copy_from_slice(&buffer);
+        
+        // For page 1, serialize includes a file header area (bytes 0-100) that we should skip
+        // since the real file header is at mmap[0..100]
+        if page.page_num == 1 {
+            // Copy only the page data portion (bytes 100 onwards from the serialized buffer)
+            self.mmap[page_offset..page_end].copy_from_slice(&buffer[HEADER_SIZE..HEADER_SIZE + write_size]);
+        } else {
+            // For other pages, copy the entire serialized buffer
+            self.mmap[page_offset..page_end].copy_from_slice(&buffer);
+        }
 
         self.page_cache.insert(page.page_num, page.clone());
 

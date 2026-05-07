@@ -1380,6 +1380,13 @@ impl VirtualMachine {
         Ok(distinct_result)
     }
 
+    /// Get all tables from the virtual machine (Phase 7b - for persistence)
+    /// 
+    /// Returns a clone of the tables HashMap for serialization and persistence.
+    pub fn get_all_tables(&self) -> HashMap<String, TableStorage> {
+        self.tables.clone()
+    }
+
 }
 
 impl Default for VirtualMachine {

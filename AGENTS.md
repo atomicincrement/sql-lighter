@@ -73,7 +73,13 @@ Claude: please do not add to this, just tick the boxes!
 ## Phase 7: Refinement, features and optimisation.
 
 - [x] Use zero copy everywhere in DatabaseFileRead. Create PageRef on demand from the memory map. Retire page_cache.
-- [ ] Implement the pre-WAL classic sqlite writing using write(). Update the memory map when the file changes size.
+- [x] Implement the pre-WAL classic sqlite writing using write(). Update the memory map when the file changes size (Phase 7b).
+  - Implemented Connection::open() with read-write capability via DatabaseFile
+  - Added persist() method that serializes modified table pages to disk
+  - Fixed write_page() to correctly handle page 1's file header preservation
+  - Pages are serialized to Box<[u8]> (via Vec<u8>) and written directly to mmap
+  - DatabaseFile::flush() persists changes to disk via fsync
+  - SQL-lighter can now read back its own written databases ✓
 - [ ] Check multithreading and multiprocess read/write. Check that fsync works by creating several Connection instances.
 - [ ] Investigate the WAL.
 
