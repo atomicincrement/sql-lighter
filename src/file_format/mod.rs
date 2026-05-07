@@ -276,6 +276,30 @@ impl DatabaseFile {
         FileHeaderMut::new(&mut self.mmap[0..HEADER_SIZE])
     }
 
+    /// Phase 7e: Get mutable PageMut reference for zero-copy writes
+    /// 
+    /// Returns a PageMut that borrows mutably from the mmap, enabling direct writes
+    /// to page buffers without intermediate allocations.
+    pub fn get_page_mut(&mut self, page_num: u32) -> Result<PageMut<'_>> {
+        let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
+        let page_size = header_ref.page_size() as usize;
+
+        // For page 1, the B-tree page data starts at byte 100 (after file header)
+        // For other pages, they start at their calculated offset
+        let page_offset = if page_num == 1 {
+            HEADER_SIZE
+        } else {
+            (page_num as usize - 1) * page_size
+        };
+
+        let page_end = page_offset + page_size;
+        if page_end > self.mmap.len() {
+            return Err(Error::ParseError("Page offset out of bounds".into()));
+        }
+
+        let page_data = &mut self.mmap[page_offset..page_end];
+        PageMut::new(page_data, page_num)
+    }
 
 
     /// Get page count

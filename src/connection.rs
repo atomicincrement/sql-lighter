@@ -10,7 +10,7 @@ use crate::parser::Parser;
 use crate::planner::{Planner, ExecutionPlan};
 use crate::types::Value;
 use crate::params::Params;
-use crate::file_format::{DatabaseFile, Page, PageType};
+use crate::file_format::{DatabaseFile, PageType};
 use std::collections::HashMap;
 
 /// Database connection - main API entry point
@@ -166,26 +166,22 @@ impl Connection {
         )
     }
 
-    /// Persist all modified tables to disk (Phase 7b)
+    /// Persist all modified tables to disk (Phase 7b/7e)
     ///
-    /// Serializes all modified table pages and writes them to the database file.
-    /// Creates page byte buffers and writes them directly via write_page().
+    /// Phase 7e: Serializes table cells directly into PageMut buffers in the mmap.
+    /// No intermediate Page struct allocations - writes directly to mmap pages.
     fn persist(&mut self) -> Result<()> {
         if let Some(db_file) = self.db_file.as_mut() {
             // Get all tables from the virtual machine
             let tables = self.vm.get_all_tables();
 
-            // Write each table's page to disk
+            // Write each table's page to disk using PageMut (Phase 7e: zero-copy writes)
             for (_table_name, table_storage) in tables {
-                // Phase 7d: Build page from cells stored in TableStorage
-                let mut page = Page {
-                    page_num: table_storage.page_num,
-                    page_type: PageType::TableLeaf,
-                    cells: table_storage.cells.clone(),
-                };
-
-                // Write the page to disk (DatabaseFile::write_page handles file header preservation)
-                db_file.write_page(&page)?;
+                // Get mutable reference to the page in the mmap
+                let mut page_mut = db_file.get_page_mut(table_storage.page_num)?;
+                
+                // Write cells directly into the page buffer
+                page_mut.write_cells(PageType::TableLeaf, &table_storage.cells)?;
             }
 
             // Flush changes to disk immediately

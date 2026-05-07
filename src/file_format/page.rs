@@ -223,6 +223,70 @@ impl<'a> PageMut<'a> {
     pub fn is_interior(&self) -> Result<bool> {
         self.as_ref().is_interior()
     }
+
+    /// Phase 7e: Write cells directly into this page buffer
+    /// 
+    /// Rebuilds the page header and cell structure in-place without intermediate allocations.
+    /// Updates cell count and offsets directly in the mmap buffer.
+    pub fn write_cells(&mut self, page_type: PageType, cells: &[Cell]) -> Result<()> {
+        // Initialize page header (8 bytes for leaf, 12 for interior)
+        let header_size = if page_type.is_leaf() { 8 } else { 12 };
+        
+        if self.buffer.len() < header_size {
+            return Err(Error::ParseError("Buffer too small for page header".into()));
+        }
+
+        // Write page type
+        self.buffer[0] = page_type as u8;
+        
+        // Write first freeblock (0 = no free blocks for now)
+        self.buffer[1..3].copy_from_slice(&0u16.to_be_bytes());
+        
+        // Write cell count
+        let cell_count = cells.len() as u16;
+        self.buffer[3..5].copy_from_slice(&cell_count.to_be_bytes());
+        
+        // Write start of content area (initially just after header + cell pointers)
+        let content_start = header_size as u16 + (cell_count * 2);
+        self.buffer[5..7].copy_from_slice(&content_start.to_be_bytes());
+        
+        // Write fragmented free bytes (0 for now)
+        self.buffer[7] = 0;
+        
+        // For interior pages, write right child pointer
+        if !page_type.is_leaf() {
+            if self.buffer.len() < 12 {
+                return Err(Error::ParseError("Buffer too small for interior page header".into()));
+            }
+            // Right child pointer (0 for now - can be updated later)
+            self.buffer[8..12].copy_from_slice(&0u32.to_be_bytes());
+        }
+
+        // Write cell pointers and cells
+        let mut current_offset = content_start as usize;
+        
+        for (i, cell) in cells.iter().enumerate() {
+            // Serialize the cell
+            let cell_bytes = cell.serialize()?;
+            
+            // Check we have space
+            if current_offset + cell_bytes.len() > self.buffer.len() {
+                return Err(Error::ParseError("Insufficient space for cell".into()));
+            }
+            
+            // Write cell pointer (offset of this cell)
+            let ptr_offset = header_size + (i * 2);
+            self.buffer[ptr_offset..ptr_offset + 2]
+                .copy_from_slice(&(current_offset as u16).to_be_bytes());
+            
+            // Write cell data
+            self.buffer[current_offset..current_offset + cell_bytes.len()]
+                .copy_from_slice(&cell_bytes);
+            current_offset += cell_bytes.len();
+        }
+
+        Ok(())
+    }
 }
 
 /// Reference-based B-tree page header wrapper

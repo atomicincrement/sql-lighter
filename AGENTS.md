@@ -81,11 +81,12 @@ The goal of this phase is to remove the current Page and Cell data structures an
   - Added read_page_ref() method to DatabaseFile for zero-copy reads
   - Updated Connection::open() to use PageRef when loading tables
   - Goal: Zero-copy table reads directly from mmap ✓
-- [ ] Phase 7e: Implement PageMut for write operations
-  - Create PageMut<'a> reference type for mutable page access
-  - Build new pages in PageMut form during INSERT/UPDATE/DELETE
-  - Serialize PageMut directly to bytes without intermediate Page struct
-  - Goal: Zero-copy writes building pages in-place
+- [x] Phase 7e: Implement PageMut for write operations
+  - Created PageMut<'a> reference type for mutable page access
+  - Added get_page_mut() to DatabaseFile for direct mmap buffer access
+  - Implemented write_cells() on PageMut for direct serialization to page buffer
+  - Modified persist() to use PageMut instead of intermediate Page struct
+  - Goal: Zero-copy writes building pages in-place ✓
 - [ ] Phase 7f: Replace Cell serialization with direct byte writing
   - Remove intermediate Cell enum usage during page writes
   - Write cell bytes directly to buffer during modification
