@@ -66,6 +66,9 @@ Claude: please do not add to this, just tick the boxes!
 - [x] Remove set_param() and make execute() use Params trait directly
 - [x] Implement prepare, Statement, and query_map methods
 - [x] Use the Btree storage from file_format for VirtualMachine.
+- [x] Split the person example. Write the table using rusqlite and read it with sql-lighter.
+- [ ] Implement the indices using the BTree storage.
+- [ ] Reverse the split person example, write the table using sql-lighter and read using rusqlite.
 
 
 
