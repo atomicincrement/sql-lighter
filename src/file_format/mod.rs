@@ -26,7 +26,6 @@ use memmap2::{Mmap, MmapMut};
 pub struct DatabaseFileRead {
     _file: File,  // Keep file handle alive for mmap lifetime
     mmap: Mmap,
-    header_buffer: [u8; HEADER_SIZE],
     page_cache: std::collections::HashMap<u32, Page>,
 }
 
@@ -46,14 +45,11 @@ impl DatabaseFileRead {
             return Err(Error::ParseError("File too small for SQLite header".into()));
         }
 
-        let mut header_buffer = [0u8; HEADER_SIZE];
-        header_buffer.copy_from_slice(&mmap[0..HEADER_SIZE]);
-        FileHeaderRef::new(&header_buffer)?;  // Validate header
+        FileHeaderRef::new(&mmap[0..HEADER_SIZE])?;  // Validate header
 
         Ok(Self {
             _file: file,
             mmap,
-            header_buffer,
             page_cache: std::collections::HashMap::new(),
         })
     }
@@ -64,7 +60,7 @@ impl DatabaseFileRead {
             return Ok(page.clone());
         }
 
-        let header_ref = FileHeaderRef::new(&self.header_buffer)?;
+        let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         let page_size = header_ref.page_size() as usize;
         let offset = (page_num as usize - 1) * page_size;
 
@@ -81,7 +77,7 @@ impl DatabaseFileRead {
 
     /// Get the file header as a reference
     pub fn header(&self) -> Result<FileHeaderRef<'_>> {
-        FileHeaderRef::new(&self.header_buffer)
+        FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])
     }
 
     /// Clear the page cache
@@ -91,7 +87,7 @@ impl DatabaseFileRead {
 
     /// Get page count
     pub fn page_count(&self) -> Result<u32> {
-        let header_ref = FileHeaderRef::new(&self.header_buffer)?;
+        let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         Ok(header_ref.page_count())
     }
 
@@ -105,7 +101,6 @@ impl DatabaseFileRead {
 pub struct DatabaseFile {
     _file: File,  // Keep file handle alive for mmap lifetime
     mmap: MmapMut,
-    header_buffer: [u8; HEADER_SIZE],
     page_cache: std::collections::HashMap<u32, Page>,
 }
 
@@ -126,14 +121,11 @@ impl DatabaseFile {
             return Err(Error::ParseError("File too small for SQLite header".into()));
         }
 
-        let mut header_buffer = [0u8; HEADER_SIZE];
-        header_buffer.copy_from_slice(&mmap[0..HEADER_SIZE]);
-        FileHeaderRef::new(&header_buffer)?;  // Validate header
+        FileHeaderRef::new(&mmap[0..HEADER_SIZE])?;  // Validate header
 
         Ok(Self {
             _file: file,
             mmap,
-            header_buffer,
             page_cache: std::collections::HashMap::new(),
         })
     }
@@ -157,19 +149,14 @@ impl DatabaseFile {
             MmapMut::map_mut(&file).map_err(|e| Error::IoError(e.to_string()))?
         };
 
-        // Initialize header
-        let mut header_buffer = [0u8; HEADER_SIZE];
-        let mut header_mut = FileHeaderMut::new(&mut header_buffer)?;
+        // Initialize header directly in mmap
+        let mut header_mut = FileHeaderMut::new(&mut mmap[0..HEADER_SIZE])?;
         header_mut.init();
         header_mut.set_page_size(page_size as u32);
-
-        // Write header to mmap
-        mmap[0..HEADER_SIZE].copy_from_slice(&header_buffer);
 
         Ok(Self {
             _file: file,
             mmap,
-            header_buffer,
             page_cache: std::collections::HashMap::new(),
         })
     }
@@ -180,7 +167,7 @@ impl DatabaseFile {
             return Ok(page.clone());
         }
 
-        let header_ref = FileHeaderRef::new(&self.header_buffer)?;
+        let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         let page_size = header_ref.page_size() as usize;
         let offset = (page_num as usize - 1) * page_size;
 
@@ -197,7 +184,7 @@ impl DatabaseFile {
 
     /// Write a page to the database
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
-        let header_ref = FileHeaderRef::new(&self.header_buffer)?;
+        let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         let page_size = header_ref.page_size() as usize;
         let offset = (page.page_num as usize - 1) * page_size;
 
@@ -216,9 +203,6 @@ impl DatabaseFile {
 
     /// Flush all changes to disk
     pub fn flush(&mut self) -> Result<()> {
-        // Update header in mmap
-        self.mmap[0..HEADER_SIZE].copy_from_slice(&self.header_buffer);
-        
         self.mmap
             .flush()
             .map_err(|e| Error::IoError(e.to_string()))?;
@@ -227,12 +211,12 @@ impl DatabaseFile {
 
     /// Get the file header as a reference
     pub fn header(&self) -> Result<FileHeaderRef<'_>> {
-        FileHeaderRef::new(&self.header_buffer)
+        FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])
     }
 
     /// Get mutable reference to header
     pub fn header_mut(&mut self) -> Result<FileHeaderMut<'_>> {
-        FileHeaderMut::new(&mut self.header_buffer)
+        FileHeaderMut::new(&mut self.mmap[0..HEADER_SIZE])
     }
 
     /// Clear the page cache
@@ -242,7 +226,7 @@ impl DatabaseFile {
 
     /// Get page count
     pub fn page_count(&self) -> Result<u32> {
-        let header_ref = FileHeaderRef::new(&self.header_buffer)?;
+        let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         Ok(header_ref.page_count())
     }
 
