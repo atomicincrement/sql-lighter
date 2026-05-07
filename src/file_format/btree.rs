@@ -5,6 +5,7 @@ use super::page::Page;
 use super::cell::Cell;
 
 /// B-tree structure for managing pages
+#[derive(Debug, Clone)]
 pub struct BTree {
     root_page: u32,
 }

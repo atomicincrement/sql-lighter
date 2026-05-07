@@ -12,6 +12,7 @@ use crate::parser::{
 };
 use crate::planner::ExecutionPlan;
 use crate::types::{Row, Value};
+use crate::file_format::{BTree, Cell, Page, PageType, Record};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -581,9 +582,176 @@ impl ExpressionEvaluator {
 /// Virtual machine for executing plans
 /// References: SQLite Virtual Machine operations and semantics
 #[derive(Debug, Clone)]
+pub struct TableStorage {
+    /// Column schema (names in order)
+    columns: Vec<String>,
+    /// B-tree for managing pages
+    btree: BTree,
+    /// In-memory page storing row data
+    page: Page,
+    /// Next available rowid
+    next_rowid: u64,
+}
+
+impl TableStorage {
+    /// Create a new table storage with given columns
+    fn new(columns: Vec<String>) -> Self {
+        Self {
+            columns,
+            btree: BTree::new(1),
+            page: Page {
+                page_num: 1,
+                page_type: PageType::TableLeaf,
+                cells: Vec::new(),
+            },
+            next_rowid: 1,
+        }
+    }
+
+    /// Add a row to the table storage
+    fn add_row(&mut self, row: &Row) -> Result<()> {
+        // Convert Row to Record using positional indexing
+        let mut values = Vec::new();
+
+        for i in 0..self.columns.len() {
+            if i < row.len() {
+                values.push(row[i].1.clone()); // Use positional indexing
+            } else {
+                values.push(Value::Null);
+            }
+        }
+
+        let record = Record { columns: values };
+        let payload = record.serialize()?;
+
+        let rowid = self.next_rowid;
+        self.next_rowid += 1;
+
+        let cell = Cell::Leaf { rowid, payload };
+        self.btree.insert(&mut self.page, cell)?;
+
+        Ok(())
+    }
+
+    /// Get all rows from the table storage
+    fn get_all_rows(&self) -> Result<Vec<Row>> {
+        let mut rows = Vec::new();
+
+        for cell in &self.page.cells {
+            if let Cell::Leaf { rowid: _, payload } = cell {
+                let record = Record::parse(payload)?;
+                let mut row = Row::new();
+
+                for (i, col_name) in self.columns.iter().enumerate() {
+                    if i < record.columns.len() {
+                        row.push((col_name.clone(), record.columns[i].clone()));
+                    } else {
+                        row.push((col_name.clone(), Value::Null));
+                    }
+                }
+
+                rows.push(row);
+            }
+        }
+
+        Ok(rows)
+    }
+
+    /// Convert to ResultSet for compatibility
+    fn to_result_set(&self) -> Result<ResultSet> {
+        let rows = self.get_all_rows()?;
+        let mut result = ResultSet::new(self.columns.clone());
+        for row in rows {
+            result.add_row(row);
+        }
+        Ok(result)
+    }
+
+    /// Delete rows matching a condition
+    fn delete_matching(&mut self, condition: &Option<Expression>, columns: &[String]) -> Result<usize> {
+        let mut deleted = 0;
+
+        self.page.cells.retain(|cell| {
+            if let Cell::Leaf { rowid: _, payload } = cell {
+                if let Ok(record) = Record::parse(payload) {
+                    let mut row = Row::new();
+                    for (i, col_name) in self.columns.iter().enumerate() {
+                        if i < record.columns.len() {
+                            row.push((col_name.clone(), record.columns[i].clone()));
+                        }
+                    }
+
+                    if let Some(cond) = condition {
+                        if let Ok(eval_result) = ExpressionEvaluator::eval(cond, &row, columns) {
+                            if ExpressionEvaluator::is_truthy(&eval_result) {
+                                deleted += 1;
+                                return false; // Remove this cell
+                            }
+                        }
+                    } else {
+                        deleted += 1;
+                        return false; // Remove if no condition (delete all)
+                    }
+                }
+            }
+            true // Keep this cell
+        });
+
+        Ok(deleted)
+    }
+
+    /// Update rows matching a condition
+    fn update_matching(
+        &mut self,
+        assignments: &[(String, Value)],
+        condition: &Option<Expression>,
+        columns: &[String],
+    ) -> Result<usize> {
+        let mut updated = 0;
+
+        for cell in &mut self.page.cells {
+            if let Cell::Leaf { rowid: _, payload } = cell {
+                if let Ok(mut record) = Record::parse(payload) {
+                    let mut row = Row::new();
+                    for (i, col_name) in self.columns.iter().enumerate() {
+                        if i < record.columns.len() {
+                            row.push((col_name.clone(), record.columns[i].clone()));
+                        }
+                    }
+
+                    let should_update = if let Some(cond) = condition {
+                        ExpressionEvaluator::eval(cond, &row, columns)
+                            .map(|v| ExpressionEvaluator::is_truthy(&v))
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    };
+
+                    if should_update {
+                        for (col_name, value) in assignments {
+                            if let Some(idx) = self.columns.iter().position(|c| c == col_name) {
+                                if idx < record.columns.len() {
+                                    record.columns[idx] = value.clone();
+                                }
+                            }
+                        }
+                        *payload = record.serialize()?;
+                        updated += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(updated)
+    }
+}
+
+/// Virtual machine for executing plans
+/// References: SQLite Virtual Machine operations and semantics
+#[derive(Debug, Clone)]
 pub struct VirtualMachine {
-    /// In-memory table storage (table_name -> rows)
-    tables: HashMap<String, ResultSet>,
+    /// Table storage using B-tree (table_name -> TableStorage)
+    tables: HashMap<String, TableStorage>,
     /// Index storage: (index_name -> (table_name, column_names, is_unique))
     indexes: HashMap<String, IndexMetadata>,
 }
@@ -618,8 +786,8 @@ impl VirtualMachine {
             ExecutionPlan::FullTableScan { table, alias: _ } => {
                 self.tables
                     .get(*table)
-                    .cloned()
-                    .ok_or_else(|| Error::ExecutionError(format!("Table '{}' not found", table)))
+                    .ok_or_else(|| Error::ExecutionError(format!("Table '{}' not found", table)))?
+                    .to_result_set()
             }
 
             // IndexScan: Search using index structure for fast lookup
@@ -632,8 +800,8 @@ impl VirtualMachine {
             } => {
                 let mut result = self.tables
                     .get(*table)
-                    .cloned()
-                    .ok_or_else(|| Error::ExecutionError(format!("Table '{}' not found", table)))?;
+                    .ok_or_else(|| Error::ExecutionError(format!("Table '{}' not found", table)))?
+                    .to_result_set()?;
 
                 if let Some(cond) = condition {
                     result = self.apply_filter(&result, cond)?;
@@ -721,13 +889,12 @@ impl VirtualMachine {
             } => {
                 // Create table if it doesn't exist
                 if !self.tables.contains_key(*table) {
+                    let column_names = (0..values[0].len())
+                        .map(|i| format!("col{}", i))
+                        .collect();
                     self.tables.insert(
                         table.to_string(),
-                        ResultSet::new(
-                            (0..values[0].len())
-                                .map(|i| format!("col{}", i))
-                                .collect(),
-                        ),
+                        TableStorage::new(column_names),
                     );
                 }
 
@@ -741,7 +908,7 @@ impl VirtualMachine {
                         let val = ExpressionEvaluator::eval(val_expr, &empty_row, &empty_columns)?;
                         row.push((format!("col{}", i), val));
                     }
-                    table_ref.add_row(row);
+                    table_ref.add_row(&row)?;
                 }
 
                 Ok(ResultSet::new(vec![]))
@@ -756,21 +923,17 @@ impl VirtualMachine {
                 condition,
             } => {
                 if let Some(table_data) = self.tables.get_mut(*table) {
-                    for row in &mut table_data.rows {
-                        if let Some(cond) = condition {
-                            let eval_result = ExpressionEvaluator::eval(cond, row, &table_data.columns)?;
-                            if !ExpressionEvaluator::is_truthy(&eval_result) {
-                                continue;
-                            }
-                        }
+                    let columns = table_data.columns.clone();
+                    let mut assign_values = Vec::new();
+                    let empty_row: Row = vec![];
+                    let empty_columns: Vec<String> = vec![];
 
-                        for assignment in assignments {
-                            if let Some(idx) = table_data.columns.iter().position(|c| c == &assignment.column.to_string()) {
-                                let new_val = ExpressionEvaluator::eval(&assignment.value, row, &table_data.columns)?;
-                                row[idx].1 = new_val;
-                            }
-                        }
+                    for assignment in assignments {
+                        let val = ExpressionEvaluator::eval(&assignment.value, &empty_row, &empty_columns)?;
+                        assign_values.push((assignment.column.to_string(), val));
                     }
+
+                    table_data.update_matching(&assign_values, condition, &columns)?;
                 }
 
                 Ok(ResultSet::new(vec![]))
@@ -781,17 +944,8 @@ impl VirtualMachine {
             // Removes all rows satisfying condition (without condition, deletes all rows)
             ExecutionPlan::Delete { table, condition } => {
                 if let Some(table_data) = self.tables.get_mut(*table) {
-                    table_data.rows.retain(|row| {
-                        if let Some(cond) = condition {
-                            if let Ok(eval_result) = ExpressionEvaluator::eval(cond, row, &table_data.columns) {
-                                !ExpressionEvaluator::is_truthy(&eval_result)
-                            } else {
-                                true
-                            }
-                        } else {
-                            false
-                        }
-                    });
+                    let columns = table_data.columns.clone();
+                    table_data.delete_matching(condition, &columns)?;
                 }
 
                 Ok(ResultSet::new(vec![]))
@@ -802,7 +956,7 @@ impl VirtualMachine {
             // Allocates table structure and prepares for INSERT operations
             ExecutionPlan::CreateTable { table, columns } => {
                 let column_names = columns.iter().map(|c| c.name.to_string()).collect();
-                self.tables.insert(table.to_string(), ResultSet::new(column_names));
+                self.tables.insert(table.to_string(), TableStorage::new(column_names));
                 Ok(ResultSet::new(vec![]))
             }
 
