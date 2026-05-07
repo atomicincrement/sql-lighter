@@ -39,7 +39,7 @@ With our rust version, We will use the same interface as rusqlite.
 **Objective:** Build the SQL parser, planner, and execution engine.
 
 - [x] Implement SQL lexer and parser
-- [ ] Build query planner and optimizer
+- [x] Build query planner and optimizer
 - [ ] Implement execution engine with virtual machine
 - [ ] Add support for basic data types and operations
 - [ ] Implement indexing structures
