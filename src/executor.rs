@@ -587,8 +587,10 @@ pub struct TableStorage {
     pub columns: Vec<String>,
     /// B-tree for managing pages
     btree: BTree,
-    /// In-memory page storing row data
-    pub page: Page,
+    /// Page number where this table is stored (Phase 7d: zero-copy reference)
+    pub page_num: u32,
+    /// Cached cells from the page for now (will be removed in Phase 7g)
+    pub cells: Vec<Cell>,
     /// Next available rowid
     next_rowid: u64,
 }
@@ -599,11 +601,8 @@ impl TableStorage {
         Self {
             columns,
             btree: BTree::new(1),
-            page: Page {
-                page_num: 1,
-                page_type: PageType::TableLeaf,
-                cells: Vec::new(),
-            },
+            page_num: 1,
+            cells: Vec::new(),
             next_rowid: 1,
         }
     }
@@ -628,7 +627,8 @@ impl TableStorage {
         self.next_rowid += 1;
 
         let cell = Cell::Leaf { rowid, payload };
-        self.btree.insert(&mut self.page, cell)?;
+        // Phase 7d: Add cell directly to cached cells (not via page struct)
+        self.cells.push(cell);
 
         Ok(())
     }
@@ -637,7 +637,7 @@ impl TableStorage {
     fn get_all_rows(&self) -> Result<Vec<Row>> {
         let mut rows = Vec::new();
 
-        for cell in &self.page.cells {
+        for cell in &self.cells {
             if let Cell::Leaf { rowid: _, payload } = cell {
                 let record = Record::parse(payload)?;
                 let mut row = Row::new();
@@ -671,7 +671,7 @@ impl TableStorage {
     fn delete_matching(&mut self, condition: &Option<Expression>, columns: &[String]) -> Result<usize> {
         let mut deleted = 0;
 
-        self.page.cells.retain(|cell| {
+        self.cells.retain(|cell| {
             if let Cell::Leaf { rowid: _, payload } = cell {
                 if let Ok(record) = Record::parse(payload) {
                     let mut row = Row::new();
@@ -709,7 +709,7 @@ impl TableStorage {
     ) -> Result<usize> {
         let mut updated = 0;
 
-        for cell in &mut self.page.cells {
+        for cell in &mut self.cells {
             if let Cell::Leaf { rowid: _, payload } = cell {
                 if let Ok(mut record) = Record::parse(payload) {
                     let mut row = Row::new();
@@ -906,15 +906,20 @@ impl VirtualMachine {
     }
 
     /// Load a table from a B-tree page (used when opening database files)
-    pub fn load_table_from_page(&mut self, table_name: &str, columns: Vec<String>, page: &Page) -> Result<()> {
-        // Create a new TableStorage for this table
+    /// Phase 7d: Accepts PageRef instead of Page for zero-copy reads from mmap
+    pub fn load_table_from_page(&mut self, table_name: &str, columns: Vec<String>, page_ref: crate::file_format::PageRef) -> Result<()> {
+        // Phase 7d: Create a new TableStorage for this table, loading from PageRef (zero-copy)
         let mut storage = crate::executor::TableStorage::new(columns.clone());
+        storage.page_num = page_ref.page_num();
 
-        // For each leaf cell in the page, parse the record and add to storage
-        for cell in &page.cells {
+        // For each leaf cell in the page, parse the record and normalize via add_row
+        // PageRef::cells() parses cells from the mmap'd buffer (zero-copy read for cell parsing)
+        let cells = page_ref.cells()?;
+        
+        for cell in cells {
             if let Cell::Leaf { rowid: _, payload } = cell {
-                // Parse the record from the cell payload
-                if let Ok(record) = Record::parse(payload) {
+                // Try to parse the record from the cell payload
+                if let Ok(record) = Record::parse(&payload) {
                     // Convert record to a Row
                     let mut row = Row::new();
                     for (i, col_name) in columns.iter().enumerate() {
@@ -924,14 +929,18 @@ impl VirtualMachine {
                             row.push((col_name.clone(), Value::Null));
                         }
                     }
-                    // Add row to storage
-                    storage.add_row(&row)?;
+                    // Add row to storage (which creates normalized cells with proper rowid tracking)
+                    // Silently ignore errors during row addition (e.g., if payload doesn't match schema)
+                    let _ = storage.add_row(&row);
                 }
+                // If Record::parse fails, just skip this cell and continue
             }
         }
 
-        // Insert the populated table into the VM
-        self.tables.insert(table_name.to_string(), storage);
+        // Only insert the table if we loaded any rows
+        if !storage.cells.is_empty() {
+            self.tables.insert(table_name.to_string(), storage);
+        }
 
         Ok(())
     }
@@ -1198,7 +1207,7 @@ impl VirtualMachine {
                 // Populate index with existing rows from the table
                 if let Some(table_storage) = self.tables.get(&table.to_string()) {
                     // Extract indexed column value for each row in the table
-                    for cell in &table_storage.page.cells {
+                    for cell in &table_storage.cells {
                         if let Cell::Leaf { rowid, payload } = cell {
                             if let Ok(record) = Record::parse(payload) {
                                 // Find the column index for the indexed column

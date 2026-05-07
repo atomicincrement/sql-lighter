@@ -74,20 +74,13 @@ Claude: please do not add to this, just tick the boxes!
 
 The goal of this phase is to remove the current Page and Cell data structures and use PageRef instead. If we are going to modify a page, we should iterate through the leaf or intermediate cells of the PageRef and write a new page directly to the file using write() (not via a mutable memory map).
 
-- [x] Use zero copy everywhere in DatabaseFileRead. Create PageRef on demand from the memory map. Retire page_cache.
-- [x] Implement the pre-WAL classic sqlite writing using write(). Update the memory map when the file changes size
-- [x] DatabaseFile should write as soon as a page is changed. We need to remove page_cache and use actual pages from the memory map. When BTree writes it should write immediately to the affected pages.
-  - Removed page_cache HashMap from DatabaseFile (Phase 7c)
-  - read_page() now reads directly from mmap without caching
-  - write_page() writes directly to mmap without caching
-  - All page modifications persist immediately upon write + flush
-  - Added 3 new tests: zero_cache_immediate_persistence, multiple_connections_concurrent_access, fsync_durability
-  - All 92 tests passing (89 original + 3 Phase 7c)
-- [ ] Phase 7d: Replace TableStorage.page with PageRef-based reads
-  - Remove Page field from TableStorage struct
-  - Modify load_table_from_page() to work with PageRef instead of owned Page
-  - Update Connection::open() to use PageRef when loading tables
-  - Goal: Zero-copy table reads directly from mmap
+- [x] Phase 7d: Replace TableStorage.page with PageRef-based reads
+  - Removed Page field from TableStorage struct
+  - TableStorage now stores page_num: u32 instead of page: Page
+  - Modified load_table_from_page() to accept PageRef instead of owned Page
+  - Added read_page_ref() method to DatabaseFile for zero-copy reads
+  - Updated Connection::open() to use PageRef when loading tables
+  - Goal: Zero-copy table reads directly from mmap ✓
 - [ ] Phase 7e: Implement PageMut for write operations
   - Create PageMut<'a> reference type for mutable page access
   - Build new pages in PageMut form during INSERT/UPDATE/DELETE

@@ -197,6 +197,31 @@ impl DatabaseFile {
         Page::parse(page_data, page_num)
     }
 
+    /// Phase 7d: Read a page as a zero-copy PageRef from the mmap
+    /// 
+    /// Returns a PageRef that borrows from the mmap, enabling zero-copy access
+    /// to page data without allocating or caching.
+    pub fn read_page_ref(&self, page_num: u32) -> Result<PageRef<'_>> {
+        let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
+        let page_size = header_ref.page_size() as usize;
+
+        // For page 1, the B-tree page data starts at byte 100 (after file header)
+        // For other pages, they start at their calculated offset
+        let page_offset = if page_num == 1 {
+            HEADER_SIZE
+        } else {
+            (page_num as usize - 1) * page_size
+        };
+
+        let page_end = page_offset + page_size;
+        if page_end > self.mmap.len() {
+            return Err(Error::ParseError("Page offset out of bounds".into()));
+        }
+
+        let page_data = &self.mmap[page_offset..page_end];
+        PageRef::new(page_data, page_num)
+    }
+
     /// Write a page to the database
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
         let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;

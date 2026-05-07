@@ -10,7 +10,7 @@ use crate::parser::Parser;
 use crate::planner::{Planner, ExecutionPlan};
 use crate::types::Value;
 use crate::params::Params;
-use crate::file_format::DatabaseFile;
+use crate::file_format::{DatabaseFile, Page, PageType};
 use std::collections::HashMap;
 
 /// Database connection - main API entry point
@@ -41,26 +41,25 @@ impl Connection {
     /// conn.close()?;  // or changes persist when dropped
     /// ```
     pub fn open(path: &str) -> Result<Self> {
-        let mut db_file = DatabaseFile::open(path)?;
+        let db_file = DatabaseFile::open(path)?;
         let mut vm = VirtualMachine::new();
 
-        // Try loading from pages sequentially until we find table data
+        // Phase 7d: Try loading from pages sequentially using read_page_ref for zero-copy
         // SQLite stores tables on multiple pages; we load the "person" table when found
         for page_num in 1..=10 {
-            match db_file.read_page(page_num) {
-                Ok(page) => {
-                    if !page.cells.is_empty() {
-                        // Try to load this page as the person table
-                        // We'll create a "person" table with 3 columns: id, name, data
-                        // This is a simplification - ideally we'd read the schema from sqlite_master
-                        if let Err(_e) = vm.load_table_from_page(
-                            "person",
-                            vec!["id".to_string(), "name".to_string(), "data".to_string()],
-                            &page,
-                        ) {
-                            // Silently ignore errors and try next page
-                            // This allows us to skip schema pages and find actual data
-                        }
+            match db_file.read_page_ref(page_num) {
+                Ok(page_ref) => {
+                    // Try to load this page as the person table
+                    // Phase 7d: Use PageRef directly for zero-copy reads
+                    // We'll create a "person" table with 3 columns: id, name, data
+                    // This is a simplification - ideally we'd read the schema from sqlite_master
+                    if let Err(_e) = vm.load_table_from_page(
+                        "person",
+                        vec!["id".to_string(), "name".to_string(), "data".to_string()],
+                        page_ref,
+                    ) {
+                        // Silently ignore errors and try next page
+                        // This allows us to skip schema pages and find actual data
                     }
                 }
                 Err(_) => {
@@ -178,10 +177,15 @@ impl Connection {
 
             // Write each table's page to disk
             for (_table_name, table_storage) in tables {
-                let page = &table_storage.page;
+                // Phase 7d: Build page from cells stored in TableStorage
+                let mut page = Page {
+                    page_num: table_storage.page_num,
+                    page_type: PageType::TableLeaf,
+                    cells: table_storage.cells.clone(),
+                };
 
                 // Write the page to disk (DatabaseFile::write_page handles file header preservation)
-                db_file.write_page(page)?;
+                db_file.write_page(&page)?;
             }
 
             // Flush changes to disk immediately
