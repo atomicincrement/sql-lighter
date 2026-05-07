@@ -11,9 +11,9 @@ pub mod record;
 pub mod varint;
 
 pub use header::{FileHeaderRef, FileHeaderMut, TextEncoding, HEADER_SIZE};
-pub use page::{Page, PageHeaderRef, PageHeaderMut, PageType};
+pub use page::{Page, PageHeaderRef, PageHeaderMut, PageType, PageRef, PageMut};
 pub use btree::BTree;
-pub use cell::Cell;
+pub use cell::{Cell, LeafCellRef, InteriorCellRef, LeafCellIter, InteriorCellIter};
 pub use record::Record;
 pub use varint::{read_varint, write_varint};
 

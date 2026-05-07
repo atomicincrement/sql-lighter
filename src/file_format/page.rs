@@ -1,7 +1,7 @@
 //! B-tree page handling
 
 use crate::error::{Error, Result};
-use super::cell::Cell;
+use super::cell::{Cell, LeafCellIter, InteriorCellIter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageType {
@@ -100,6 +100,38 @@ impl<'a> PageRef<'a> {
         Ok(cells)
     }
 
+    /// Get an iterator over leaf cells in this page (zero-copy)
+    /// Returns None if this page is not a leaf page
+    pub fn as_leaf_cells(&self) -> Result<Option<LeafCellIter<'_>>> {
+        let header = self.header()?;
+        
+        if !header.page_type()?.is_leaf() {
+            return Ok(None);
+        }
+
+        let header_size = header.header_size()?;
+        let cell_pointer_start = if self.page_num == 1 { 100 } else { header_size };
+        let cell_count = header.cell_count();
+
+        Ok(Some(LeafCellIter::new(self.buffer, cell_pointer_start, cell_count)))
+    }
+
+    /// Get an iterator over interior cells in this page (zero-copy)
+    /// Returns None if this page is not an interior page
+    pub fn as_interior_cells(&self) -> Result<Option<InteriorCellIter<'_>>> {
+        let header = self.header()?;
+        
+        if !header.page_type()?.is_interior() {
+            return Ok(None);
+        }
+
+        let header_size = header.header_size()?;
+        let cell_pointer_start = if self.page_num == 1 { 100 } else { header_size };
+        let cell_count = header.cell_count();
+
+        Ok(Some(InteriorCellIter::new(self.buffer, cell_pointer_start, cell_count)))
+    }
+
     pub fn is_leaf(&self) -> Result<bool> {
         Ok(self.page_type()?.is_leaf())
     }
@@ -149,6 +181,38 @@ impl<'a> PageMut<'a> {
     /// Parse all cells from this page
     pub fn cells(&self) -> Result<Vec<Cell>> {
         self.as_ref().cells()
+    }
+
+    /// Get an iterator over leaf cells in this page (zero-copy)
+    /// Returns None if this page is not a leaf page
+    pub fn as_leaf_cells(&mut self) -> Result<Option<LeafCellIter<'_>>> {
+        let header = PageHeaderRef::new(self.buffer)?;
+        
+        if !header.page_type()?.is_leaf() {
+            return Ok(None);
+        }
+
+        let header_size = header.header_size()?;
+        let cell_pointer_start = if self.page_num == 1 { 100 } else { header_size };
+        let cell_count = header.cell_count();
+
+        Ok(Some(LeafCellIter::new(self.buffer, cell_pointer_start, cell_count)))
+    }
+
+    /// Get an iterator over interior cells in this page (zero-copy)
+    /// Returns None if this page is not an interior page
+    pub fn as_interior_cells(&mut self) -> Result<Option<InteriorCellIter<'_>>> {
+        let header = PageHeaderRef::new(self.buffer)?;
+        
+        if !header.page_type()?.is_interior() {
+            return Ok(None);
+        }
+
+        let header_size = header.header_size()?;
+        let cell_pointer_start = if self.page_num == 1 { 100 } else { header_size };
+        let cell_count = header.cell_count();
+
+        Ok(Some(InteriorCellIter::new(self.buffer, cell_pointer_start, cell_count)))
     }
 
     pub fn is_leaf(&self) -> Result<bool> {
