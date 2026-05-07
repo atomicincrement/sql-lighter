@@ -101,6 +101,56 @@ impl<'a> PageRef<'a> {
         Ok(cells)
     }
 
+    /// Phase 7g: Get raw cell byte slices without parsing into Cell objects
+    /// Returns Vec of byte slices, one for each cell in the page
+    pub fn raw_cells(&self) -> Result<Vec<&'a [u8]>> {
+        let header = self.header()?;
+        let header_size = header.header_size()?;
+
+        // Cell pointers come after the header
+        let cell_pointer_start = header_size;
+        let cell_count = header.cell_count();
+
+        let mut cells = Vec::new();
+
+        // Read cell pointers and cells
+        for i in 0..cell_count as usize {
+            let ptr_offset = cell_pointer_start + (i * 2);
+            if ptr_offset + 2 > self.buffer.len() {
+                return Err(Error::ParseError("Cell pointer out of bounds".into()));
+            }
+
+            let cell_offset = u16::from_be_bytes([
+                self.buffer[ptr_offset],
+                self.buffer[ptr_offset + 1],
+            ]) as usize;
+
+            if cell_offset >= self.buffer.len() {
+                return Err(Error::ParseError("Cell offset out of bounds".into()));
+            }
+
+            // Find the end of this cell by looking at the next cell pointer or end of free space
+            let cell_end = if i + 1 < cell_count as usize {
+                // Look at next cell pointer to find end
+                let next_ptr_offset = cell_pointer_start + ((i + 1) * 2);
+                let next_cell_offset = u16::from_be_bytes([
+                    self.buffer[next_ptr_offset],
+                    self.buffer[next_ptr_offset + 1],
+                ]) as usize;
+                next_cell_offset
+            } else {
+                // For last cell, go until end of buffer or fragmented free bytes marker
+                self.buffer.len()
+            };
+
+            if cell_offset < cell_end {
+                cells.push(&self.buffer[cell_offset..cell_end]);
+            }
+        }
+
+        Ok(cells)
+    }
+
     /// Get an iterator over leaf cells in this page (zero-copy)
     /// Returns None if this page is not a leaf page
     pub fn as_leaf_cells(&self) -> Result<Option<LeafCellIter<'_>>> {
@@ -438,7 +488,10 @@ impl Page {
         }
     }
 
-    /// Parse a page from a buffer
+    /// Parse a page from a buffer (deprecated - use PageRef instead)
+    /// 
+    /// Phase 7g: For zero-copy access without Cell allocations, use PageRef directly.
+    /// This method is kept for backward compatibility but should be phased out.
     pub fn parse(buffer: &[u8], page_num: u32) -> Result<Self> {
         let page_ref = PageRef::new(buffer, page_num)?;
         let page_type = page_ref.page_type()?;

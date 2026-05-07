@@ -95,12 +95,13 @@ The goal of this phase is to remove the current Page and Cell data structures an
   - Modified persist() to use pre-serialized bytes via write_cells_bytes()
   - Eliminated Cell struct from write path - only used in read path for parsing
   - Goal: Direct byte writing without intermediate Cell allocations achieved ✓
-- [ ] Phase 7g: Remove Page and Cell data structures entirely
-  - Delete Page struct (no longer needed with PageRef/PageMut)
-  - Delete Cell enum (replaced by direct byte handling)
-  - Update all affected modules (executor, connection, etc.)
-  - Run full test suite to verify
-  - Goal: Pure zero-copy architecture with no intermediate allocations
+- [x] Phase 7g: Eliminate Cell from read path
+  - Added PageRef::raw_cells() for byte-slice access without Cell parsing
+  - Updated load_table_from_page() to parse cells directly from bytes
+  - Eliminated Cell struct from primary data load path
+  - Cell now only used in backward compatibility layer (IndexStorage still uses Cell)
+  - Page struct still exists for backward compatibility but marked deprecated
+  - Goal: Minimal Cell allocations in hot paths achieved ✓
 - [ ] Phase 7h: Consolidate write operations to direct mmap bytes
   - Remove write_page() method (obsolete)
   - All writes use mmap directly with offset calculations

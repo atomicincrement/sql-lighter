@@ -973,32 +973,38 @@ impl VirtualMachine {
     /// Load a table from a B-tree page (used when opening database files)
     /// Phase 7d: Accepts PageRef instead of Page for zero-copy reads from mmap
     pub fn load_table_from_page(&mut self, table_name: &str, columns: Vec<String>, page_ref: crate::file_format::PageRef) -> Result<()> {
-        // Phase 7d: Create a new TableStorage for this table, loading from PageRef (zero-copy)
+        // Phase 7g: Use raw_cells() to avoid Cell struct allocation during load
         let mut storage = crate::executor::TableStorage::new(columns.clone());
         storage.page_num = page_ref.page_num();
 
-        // For each leaf cell in the page, parse the record and normalize via add_row
-        // PageRef::cells() parses cells from the mmap'd buffer (zero-copy read for cell parsing)
-        let cells = page_ref.cells()?;
+        // Get raw cell bytes without parsing into Cell objects
+        let raw_cells = page_ref.raw_cells()?;
         
-        for cell in cells {
-            if let Cell::Leaf { rowid: _, payload } = cell {
-                // Try to parse the record from the cell payload
-                if let Ok(record) = Record::parse(&payload) {
-                    // Convert record to a Row
-                    let mut row = Row::new();
-                    for (i, col_name) in columns.iter().enumerate() {
-                        if i < record.columns.len() {
-                            row.push((col_name.clone(), record.columns[i].clone()));
-                        } else {
-                            row.push((col_name.clone(), Value::Null));
+        for cell_bytes in raw_cells {
+            // Parse leaf cell format directly: varint payload_len + varint rowid + payload
+            // This avoids the Cell enum entirely (Phase 7g)
+            if let Ok((payload_len, mut offset)) = crate::file_format::varint::read_varint(cell_bytes) {
+                if let Ok((rowid, rowid_len)) = crate::file_format::varint::read_varint(&cell_bytes[offset..]) {
+                    offset += rowid_len;
+                    let payload_end = offset + payload_len as usize;
+                    if payload_end <= cell_bytes.len() {
+                        let payload = &cell_bytes[offset..payload_end];
+                        // Try to parse the record from the cell payload
+                        if let Ok(record) = Record::parse(payload) {
+                            // Convert record to a Row
+                            let mut row = Row::new();
+                            for (i, col_name) in columns.iter().enumerate() {
+                                if i < record.columns.len() {
+                                    row.push((col_name.clone(), record.columns[i].clone()));
+                                } else {
+                                    row.push((col_name.clone(), Value::Null));
+                                }
+                            }
+                            // Add row to storage (which creates normalized cells with proper rowid tracking)
+                            let _ = storage.add_row(&row);
                         }
                     }
-                    // Add row to storage (which creates normalized cells with proper rowid tracking)
-                    // Silently ignore errors during row addition (e.g., if payload doesn't match schema)
-                    let _ = storage.add_row(&row);
                 }
-                // If Record::parse fails, just skip this cell and continue
             }
         }
 

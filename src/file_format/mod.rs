@@ -80,10 +80,10 @@ impl DatabaseFileRead {
         PageRef::new(page_data, page_num)
     }
 
-    /// Read a page from the database into an owned Page
+    /// Read a page from the database into an owned Page (deprecated - use read_page_ref instead)
     /// 
-    /// For convenience, this parses the page data into an owned Page struct.
-    /// For zero-copy access, use read_page_ref() instead.
+    /// Phase 7g: For zero-copy access without Cell allocations, use read_page_ref() instead.
+    /// This method is kept for backward compatibility but should be phased out.
     pub fn read_page(&self, page_num: u32) -> Result<Page> {
         let page_ref = self.read_page_ref(page_num)?;
         let page_type = page_ref.page_type()?;
