@@ -598,8 +598,12 @@ impl VirtualMachine {
     }
 
     /// Execute an execution plan
+    /// References: https://www.sqlite.org/opcode.html
     pub fn execute(&mut self, plan: &ExecutionPlan) -> Result<ResultSet> {
         match plan {
+            // FullTableScan: Sequential scan of entire table without index
+            // Example: SELECT * FROM users
+            // Generates all rows from table in storage order
             ExecutionPlan::FullTableScan { table, alias: _ } => {
                 self.tables
                     .get(*table)
@@ -607,6 +611,9 @@ impl VirtualMachine {
                     .ok_or_else(|| Error::ExecutionError(format!("Table '{}' not found", table)))
             }
 
+            // IndexScan: Search using index structure for fast lookup
+            // Example: SELECT * FROM users WHERE id = 42 (uses PRIMARY KEY index)
+            // Returns only rows matching index condition, avoiding full table scan
             ExecutionPlan::IndexScan {
                 table,
                 index: _,
@@ -624,11 +631,17 @@ impl VirtualMachine {
                 Ok(result)
             }
 
+            // Filter: Apply WHERE clause to eliminate non-matching rows
+            // Example: SELECT * FROM orders WHERE total > 100
+            // Evaluates condition on each row, keeping only rows where condition is true
             ExecutionPlan::Filter { input, condition } => {
                 let input_result = self.execute(input)?;
                 self.apply_filter(&input_result, condition)
             }
 
+            // Sort: Arrange rows in specified order (ASC/DESC)
+            // Example: SELECT * FROM products ORDER BY price DESC, name ASC
+            // Primary sort by price (descending), then by name (ascending) for ties
             ExecutionPlan::Sort { input, order_by } => {
                 let mut result = self.execute(input)?;
 
@@ -644,6 +657,9 @@ impl VirtualMachine {
                 Ok(result)
             }
 
+            // Limit: Restrict output rows to specified count and start position
+            // Example: SELECT * FROM logs LIMIT 10 OFFSET 20
+            // Returns 10 rows starting from row 20 (pagination)
             ExecutionPlan::Limit {
                 input,
                 limit,
@@ -676,11 +692,17 @@ impl VirtualMachine {
                 Ok(result)
             }
 
+            // Project: Select specific columns from result set
+            // Example: SELECT id, name, email FROM users
+            // Returns only specified columns, dropping others (column pruning)
             ExecutionPlan::Project { input, columns } => {
                 let result = self.execute(input)?;
                 result.project(columns)
             }
 
+            // Insert: Add new rows to table
+            // Example: INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')
+            // Evaluates value expressions and appends new rows to table storage
             ExecutionPlan::Insert {
                 table,
                 columns: _,
@@ -714,6 +736,9 @@ impl VirtualMachine {
                 Ok(ResultSet::new(vec![]))
             }
 
+            // Update: Modify existing rows in table
+            // Example: UPDATE users SET status = 'active', modified = NOW() WHERE id = 42
+            // Finds matching rows and applies column assignments to each
             ExecutionPlan::Update {
                 table,
                 assignments,
@@ -740,6 +765,9 @@ impl VirtualMachine {
                 Ok(ResultSet::new(vec![]))
             }
 
+            // Delete: Remove rows from table
+            // Example: DELETE FROM audit_log WHERE created_at < '2020-01-01'
+            // Removes all rows satisfying condition (without condition, deletes all rows)
             ExecutionPlan::Delete { table, condition } => {
                 if let Some(table_data) = self.tables.get_mut(*table) {
                     table_data.rows.retain(|row| {
@@ -758,12 +786,19 @@ impl VirtualMachine {
                 Ok(ResultSet::new(vec![]))
             }
 
+            // CreateTable: Define new table schema and initialize storage
+            // Example: CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)
+            // Allocates table structure and prepares for INSERT operations
             ExecutionPlan::CreateTable { table, columns } => {
                 let column_names = columns.iter().map(|c| c.name.to_string()).collect();
                 self.tables.insert(table.to_string(), ResultSet::new(column_names));
                 Ok(ResultSet::new(vec![]))
             }
 
+            // NestedLoopJoin: Cartesian product with optional join condition
+            // Example: SELECT * FROM orders o JOIN customers c ON o.customer_id = c.id
+            // For each row in left table, matches against all rows in right table
+            // O(n*m) complexity - simple but slower for large tables
             ExecutionPlan::NestedLoopJoin {
                 left,
                 right,
@@ -774,6 +809,10 @@ impl VirtualMachine {
                 self.nested_loop_join(&left_result, &right_result, condition)
             }
 
+            // HashJoin: Hash-based join for better performance on large datasets
+            // Example: SELECT * FROM orders JOIN customers ON orders.cust_id = customers.id
+            // Builds hash table from smaller input, probes with other input
+            // O(n+m) expected complexity - faster than nested loop for most cases
             ExecutionPlan::HashJoin {
                 left,
                 right,
@@ -785,6 +824,9 @@ impl VirtualMachine {
                 self.hash_join(&left_result, &right_result, left_key, right_key)
             }
 
+            // Composite: Execute sequence of plans, using output of one as input to next
+            // Example: BEGIN; INSERT INTO log VALUES (...); UPDATE stats SET count = count + 1; COMMIT;
+            // Chains multiple operations together, returning result of final plan
             ExecutionPlan::Composite(plans) => {
                 let mut result = ResultSet::new(vec![]);
                 for plan in plans {
