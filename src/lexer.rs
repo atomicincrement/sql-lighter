@@ -110,27 +110,27 @@ impl<'a> Lexer<'a> {
             return Ok(Token::Eof);
         }
 
-        let ch = self.bytes[self.pos] as char;
+        let byte = self.bytes[self.pos];
 
         // Blob literal: X'...' or x'...'
-        if (ch == 'X' || ch == 'x') && self.pos + 1 < self.input.len() {
+        if (byte == b'X' || byte == b'x') && self.pos + 1 < self.input.len() {
             if self.bytes[self.pos + 1] == b'\'' {
                 return self.read_blob_literal();
             }
         }
 
         // String literal: '...' (single-quoted)
-        if ch == '\'' {
+        if byte == b'\'' {
             return self.read_string_literal();
         }
 
         // Number literal: starts with digit or . (for decimals like .5)
-        if ch.is_ascii_digit() || (ch == '.' && matches!(self.peek_char(), Some(c) if c.is_ascii_digit())) {
+        if byte.is_ascii_digit() || (byte == b'.' && matches!(self.peek_byte(), Some(c) if c.is_ascii_digit())) {
             return self.read_number_literal();
         }
 
         // Identifier or keyword: starts with letter or underscore
-        if ch.is_ascii_alphabetic() || ch == '_' {
+        if byte.is_ascii_alphabetic() || byte == b'_' {
             return self.read_identifier();
         }
 
@@ -145,8 +145,8 @@ impl<'a> Lexer<'a> {
         }
 
         Err(Error::ParseError(format!(
-            "Unexpected character '{}' at position {}",
-            ch, self.pos
+            "Unexpected byte {} at position {}",
+            byte, self.pos
         )))
     }
 
@@ -169,24 +169,24 @@ impl<'a> Lexer<'a> {
     /// Skip whitespace and comments
     fn skip_whitespace_and_comments(&mut self) {
         while self.pos < self.input.len() {
-            let ch = self.bytes[self.pos] as char;
+            let byte = self.bytes[self.pos];
 
-            if ch.is_whitespace() {
+            if (byte as char).is_whitespace() {
                 self.pos += 1;
-            } else if ch == '-' && self.peek_char() == Some('-') {
+            } else if byte == b'-' && self.peek_byte() == Some(b'-') {
                 // Line comment: -- until newline
                 self.pos += 2;
-                while self.pos < self.input.len() && self.bytes[self.pos] as char != '\n' {
+                while self.pos < self.input.len() && self.bytes[self.pos] != b'\n' {
                     self.pos += 1;
                 }
                 if self.pos < self.input.len() {
                     self.pos += 1; // skip newline
                 }
-            } else if ch == '/' && self.peek_char() == Some('*') {
+            } else if byte == b'/' && self.peek_byte() == Some(b'*') {
                 // Block comment: /* ... */
                 self.pos += 2;
                 while self.pos + 1 < self.input.len() {
-                    if self.bytes[self.pos] as char == '*' && self.bytes[self.pos + 1] as char == '/' {
+                    if self.bytes[self.pos] == b'*' && self.bytes[self.pos + 1] == b'/' {
                         self.pos += 2;
                         break;
                     }
@@ -198,20 +198,20 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Get the next character without consuming it
-    fn peek_char(&self) -> Option<char> {
+    /// Get the next byte without consuming it
+    fn peek_byte(&self) -> Option<u8> {
         if self.pos + 1 < self.input.len() {
-            Some(self.bytes[self.pos + 1] as char)
+            Some(self.bytes[self.pos + 1])
         } else {
             None
         }
     }
 
-    /// Get character at offset without consuming
+    /// Get byte at offset without consuming
     #[allow(dead_code)]
-    fn peek_at(&self, offset: usize) -> Option<char> {
+    fn peek_byte_at(&self, offset: usize) -> Option<u8> {
         if self.pos + offset < self.input.len() {
-            Some(self.bytes[self.pos + offset] as char)
+            Some(self.bytes[self.pos + offset])
         } else {
             None
         }
@@ -222,19 +222,19 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
         self.pos += 1; // skip X/x
         
-        if self.pos >= self.input.len() || self.bytes[self.pos] as char != '\'' {
+        if self.pos >= self.input.len() || self.bytes[self.pos] != b'\'' {
             return Err(Error::ParseError("Invalid blob literal".into()));
         }
         self.pos += 1; // skip opening quote
 
         // Read hex digits until closing quote
         while self.pos < self.input.len() {
-            let ch = self.bytes[self.pos] as char;
-            if ch == '\'' {
+            let byte = self.bytes[self.pos];
+            if byte == b'\'' {
                 self.pos += 1; // skip closing quote
                 return Ok(Token::BlobLiteral(&self.input[start..self.pos]));
             }
-            if !ch.is_ascii_hexdigit() {
+            if !byte.is_ascii_hexdigit() {
                 return Err(Error::ParseError("Invalid hex digit in blob literal".into()));
             }
             self.pos += 1;
@@ -249,11 +249,11 @@ impl<'a> Lexer<'a> {
         self.pos += 1; // skip opening quote
 
         while self.pos < self.input.len() {
-            let ch = self.bytes[self.pos] as char;
-            if ch == '\'' {
+            let byte = self.bytes[self.pos];
+            if byte == b'\'' {
                 self.pos += 1;
                 // Check for doubled quote ('' = escaped quote)
-                if self.pos < self.input.len() && self.bytes[self.pos] as char == '\'' {
+                if self.pos < self.input.len() && self.bytes[self.pos] == b'\'' {
                     self.pos += 1; // skip second quote, continue
                 } else {
                     return Ok(Token::StringLiteral(&self.input[start..self.pos]));
@@ -271,13 +271,13 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
 
         // Read initial digits (or . for decimals like .5)
-        if self.bytes[self.pos] as char == '.' {
+        if self.bytes[self.pos] == b'.' {
             self.pos += 1;
             while self.pos < self.input.len() && self.bytes[self.pos].is_ascii_digit() {
                 self.pos += 1;
             }
             // Must have exponent to be real
-            if self.pos < self.input.len() && (self.bytes[self.pos] as char == 'e' || self.bytes[self.pos] as char == 'E') {
+            if self.pos < self.input.len() && (self.bytes[self.pos] == b'e' || self.bytes[self.pos] == b'E') {
                 return self.read_number_exponent(start);
             }
             return Ok(Token::RealLiteral(&self.input[start..self.pos]));
@@ -289,7 +289,7 @@ impl<'a> Lexer<'a> {
         }
 
         // Check for decimal point
-        if self.pos < self.input.len() && self.bytes[self.pos] as char == '.' {
+        if self.pos < self.input.len() && self.bytes[self.pos] == b'.' {
             let after_dot = self.pos + 1;
             if after_dot < self.input.len() && self.bytes[after_dot].is_ascii_digit() {
                 self.pos = after_dot;
@@ -297,7 +297,7 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                 }
                 // Check for exponent
-                if self.pos < self.input.len() && (self.bytes[self.pos] as char == 'e' || self.bytes[self.pos] as char == 'E') {
+                if self.pos < self.input.len() && (self.bytes[self.pos] == b'e' || self.bytes[self.pos] == b'E') {
                     return self.read_number_exponent(start);
                 }
                 return Ok(Token::RealLiteral(&self.input[start..self.pos]));
@@ -305,7 +305,7 @@ impl<'a> Lexer<'a> {
         }
 
         // Check for exponent (makes it real)
-        if self.pos < self.input.len() && (self.bytes[self.pos] as char == 'e' || self.bytes[self.pos] as char == 'E') {
+        if self.pos < self.input.len() && (self.bytes[self.pos] == b'e' || self.bytes[self.pos] == b'E') {
             return self.read_number_exponent(start);
         }
 
@@ -316,7 +316,7 @@ impl<'a> Lexer<'a> {
     fn read_number_exponent(&mut self, start: usize) -> Result<Token<'a>> {
         self.pos += 1; // skip e/E
         
-        if self.pos < self.input.len() && (self.bytes[self.pos] as char == '+' || self.bytes[self.pos] as char == '-') {
+        if self.pos < self.input.len() && (self.bytes[self.pos] == b'+' || self.bytes[self.pos] == b'-') {
             self.pos += 1;
         }
 
@@ -337,8 +337,8 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
 
         while self.pos < self.input.len() {
-            let ch = self.bytes[self.pos] as char;
-            if ch.is_ascii_alphanumeric() || ch == '_' {
+            let byte = self.bytes[self.pos];
+            if byte.is_ascii_alphanumeric() || byte == b'_' {
                 self.pos += 1;
             } else {
                 break;
@@ -361,16 +361,17 @@ impl<'a> Lexer<'a> {
 
         // Try two-character operators first
         if self.pos + 1 < self.input.len() {
-            let two_char = [self.bytes[self.pos] as char, self.bytes[self.pos + 1] as char];
-            if matches!(two_char, ['<', '='] | ['<', '>'] | ['>', '='] | ['=', '='] | ['!', '='] | ['|', '|']) {
+            let byte1 = self.bytes[self.pos];
+            let byte2 = self.bytes[self.pos + 1];
+            if matches!((byte1, byte2), (b'<', b'=') | (b'<', b'>') | (b'>', b'=') | (b'=', b'=') | (b'!', b'=') | (b'|', b'|')) {
                 self.pos += 2;
                 return Some(Token::Operator(&self.input[start..self.pos]));
             }
         }
 
         // Single-character operators
-        let ch = self.bytes[self.pos] as char;
-        if matches!(ch, '+' | '-' | '*' | '/' | '%' | '=' | '<' | '>' | '|' | '&' | '^' | '~') {
+        let byte = self.bytes[self.pos];
+        if matches!(byte, b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'<' | b'>' | b'|' | b'&' | b'^' | b'~') {
             self.pos += 1;
             return Some(Token::Operator(&self.input[start..self.pos]));
         }
@@ -381,9 +382,9 @@ impl<'a> Lexer<'a> {
     /// Try to read punctuation
     fn try_read_punctuation(&mut self) -> Option<Token<'a>> {
         let start = self.pos;
-        let ch = self.bytes[self.pos] as char;
+        let byte = self.bytes[self.pos];
 
-        if matches!(ch, '(' | ')' | ',' | ';' | '[' | ']') {
+        if matches!(byte, b'(' | b')' | b',' | b';' | b'[' | b']') {
             self.pos += 1;
             return Some(Token::Punctuation(&self.input[start..self.pos]));
         }
