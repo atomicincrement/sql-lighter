@@ -22,6 +22,7 @@ With our rust version, We will use the same interface as rusqlite.
 - [x] Analyse query planner architecture → `docs/planner.md`
 - [x] Analyse SQL execution engine → `docs/engine.md`
 - [x] Analyse plugin mechanism → `docs/plugins.md`
+- [x] Investigate WAL (Write-Ahead Log) and lock file mechanisms → `docs/wal_and_locks.md`
 
 ## Phase 3: File Format Implementation
 
