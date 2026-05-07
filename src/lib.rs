@@ -3,6 +3,7 @@
 //! This library provides a complete SQL database engine compatible with SQLite's file format.
 
 pub mod file_format;
+pub mod lexer;
 pub mod parser;
 pub mod planner;
 pub mod executor;
