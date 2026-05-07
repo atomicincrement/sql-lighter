@@ -197,9 +197,9 @@ SQL Lighter aims to be a high-performance, pure Rust implementation of SQLite th
 
 ## Success Criteria for Phase 1
 
-- [ ] SQLite source code analyzed and documented
-- [ ] Competitive landscape fully understood
-- [ ] Design decisions documented and agreed
-- [ ] Team aligned on architecture
-- [ ] Development environment set up
+- [x] SQLite source code analyzed and documented
+- [x] Competitive landscape fully understood
+- [x] Design decisions documented and agreed
+- [x] Team aligned on architecture
+- [x] Development environment set up
 - [ ] Initial benchmark baseline established
