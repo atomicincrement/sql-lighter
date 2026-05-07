@@ -392,24 +392,24 @@ impl<'a> Lexer<'a> {
     }
 }
 
-/// Check if a word is a SQL keyword (case-insensitive)
+/// Check if a word is a SQL keyword (case-insensitive, zero-copy)
 fn is_keyword(word: &str) -> bool {
-    matches!(
-        word.to_uppercase().as_str(),
-        "SELECT" | "FROM" | "WHERE" | "AND" | "OR" | "NOT" | "IN" | "IS" | "NULL" | "TRUE"
-            | "FALSE" | "LIKE" | "BETWEEN" | "ORDER" | "BY" | "GROUP" | "HAVING" | "LIMIT"
-            | "OFFSET" | "DISTINCT" | "AS" | "JOIN" | "LEFT" | "RIGHT" | "INNER" | "OUTER"
-            | "ON" | "CROSS" | "UNION" | "ALL" | "EXCEPT" | "INTERSECT" | "CREATE" | "TABLE"
-            | "INSERT" | "INTO" | "VALUES" | "UPDATE" | "SET" | "DELETE" | "DROP" | "ALTER"
-            | "ADD" | "COLUMN" | "INDEX" | "PRIMARY" | "KEY" | "FOREIGN" | "REFERENCES"
-            | "DEFAULT" | "CHECK" | "UNIQUE" | "AUTOINCREMENT" | "BEGIN" | "COMMIT"
-            | "ROLLBACK" | "TRANSACTION" | "PRAGMA" | "ATTACH" | "DETACH" | "DATABASE"
-            | "VACUUM" | "ANALYZE" | "EXPLAIN" | "PLAN" | "QUERY" | "CAST" | "CASE" | "WHEN"
-            | "THEN" | "ELSE" | "END" | "WITH" | "RECURSIVE" | "USING" | "COLLATE" | "ASC"
-            | "DESC" | "NULLS" | "FIRST" | "LAST" | "ESCAPE" | "EXISTS" | "PARTITION" | "OVER"
-            | "WINDOW" | "ROWS" | "RANGE" | "UNBOUNDED" | "PRECEDING" | "FOLLOWING" | "CURRENT"
-            | "ROW" | "GENERATED" | "ALWAYS" | "STORED" | "VIRTUAL"
-    )
+    const KEYWORDS: &[&str] = &[
+        "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL", "TRUE",
+        "FALSE", "LIKE", "BETWEEN", "ORDER", "BY", "GROUP", "HAVING", "LIMIT",
+        "OFFSET", "DISTINCT", "AS", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER",
+        "ON", "CROSS", "UNION", "ALL", "EXCEPT", "INTERSECT", "CREATE", "TABLE",
+        "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "DROP", "ALTER",
+        "ADD", "COLUMN", "INDEX", "PRIMARY", "KEY", "FOREIGN", "REFERENCES",
+        "DEFAULT", "CHECK", "UNIQUE", "AUTOINCREMENT", "BEGIN", "COMMIT",
+        "ROLLBACK", "TRANSACTION", "PRAGMA", "ATTACH", "DETACH", "DATABASE",
+        "VACUUM", "ANALYZE", "EXPLAIN", "PLAN", "QUERY", "CAST", "CASE", "WHEN",
+        "THEN", "ELSE", "END", "WITH", "RECURSIVE", "USING", "COLLATE", "ASC",
+        "DESC", "NULLS", "FIRST", "LAST", "ESCAPE", "EXISTS", "PARTITION", "OVER",
+        "WINDOW", "ROWS", "RANGE", "UNBOUNDED", "PRECEDING", "FOLLOWING", "CURRENT",
+        "ROW", "GENERATED", "ALWAYS", "STORED", "VIRTUAL",
+    ];
+    KEYWORDS.iter().any(|kw| kw.eq_ignore_ascii_case(word))
 }
 
 #[cfg(test)]
