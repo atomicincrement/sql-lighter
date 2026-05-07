@@ -87,11 +87,14 @@ The goal of this phase is to remove the current Page and Cell data structures an
   - Implemented write_cells() on PageMut for direct serialization to page buffer
   - Modified persist() to use PageMut instead of intermediate Page struct
   - Goal: Zero-copy writes building pages in-place ✓
-- [ ] Phase 7f: Replace Cell serialization with direct byte writing
-  - Remove intermediate Cell enum usage during page writes
-  - Write cell bytes directly to buffer during modification
-  - Serialize page headers and cells in one pass
-  - Goal: Eliminate Cell struct from write path
+- [x] Phase 7f: Replace Cell serialization with direct byte writing
+  - Changed TableStorage.cells: Vec<Cell> to cells_bytes: Vec<Vec<u8>> (pre-serialized)
+  - Implemented write_cells_bytes() for direct byte writing without Cell enum
+  - Updated add_row() to directly serialize cell bytes instead of creating Cell objects
+  - Updated DELETE and UPDATE operations to parse bytes on-demand
+  - Modified persist() to use pre-serialized bytes via write_cells_bytes()
+  - Eliminated Cell struct from write path - only used in read path for parsing
+  - Goal: Direct byte writing without intermediate Cell allocations achieved ✓
 - [ ] Phase 7g: Remove Page and Cell data structures entirely
   - Delete Page struct (no longer needed with PageRef/PageMut)
   - Delete Cell enum (replaced by direct byte handling)

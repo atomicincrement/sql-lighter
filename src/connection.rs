@@ -166,22 +166,29 @@ impl Connection {
         )
     }
 
-    /// Persist all modified tables to disk (Phase 7b/7e)
+    /// Persist all modified tables to disk (Phase 7b/7e/7f)
     ///
-    /// Phase 7e: Serializes table cells directly into PageMut buffers in the mmap.
-    /// No intermediate Page struct allocations - writes directly to mmap pages.
+    /// Phase 7f: Uses pre-serialized cell bytes directly into PageMut buffers in the mmap.
+    /// Cells are pre-serialized, so we only copy bytes directly - no serialization step needed.
+    /// No intermediate Cell or Page struct allocations - writes directly to mmap pages.
     fn persist(&mut self) -> Result<()> {
         if let Some(db_file) = self.db_file.as_mut() {
             // Get all tables from the virtual machine
             let tables = self.vm.get_all_tables();
 
-            // Write each table's page to disk using PageMut (Phase 7e: zero-copy writes)
+            // Write each table's page to disk using PageMut (Phase 7f: direct byte writing)
             for (_table_name, table_storage) in tables {
                 // Get mutable reference to the page in the mmap
                 let mut page_mut = db_file.get_page_mut(table_storage.page_num)?;
                 
-                // Write cells directly into the page buffer
-                page_mut.write_cells(PageType::TableLeaf, &table_storage.cells)?;
+                // Phase 7f: Convert Vec<Vec<u8>> to Vec<&[u8]> for write_cells_bytes
+                let cell_byte_refs: Vec<&[u8]> = table_storage.cells_bytes
+                    .iter()
+                    .map(|b| b.as_slice())
+                    .collect();
+                
+                // Write pre-serialized cell bytes directly into the page buffer (Phase 7f: eliminate Cell struct from write path)
+                page_mut.write_cells_bytes(PageType::TableLeaf, &cell_byte_refs)?;
             }
 
             // Flush changes to disk immediately

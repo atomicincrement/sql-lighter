@@ -224,11 +224,12 @@ impl<'a> PageMut<'a> {
         self.as_ref().is_interior()
     }
 
-    /// Phase 7e: Write cells directly into this page buffer
+    /// Phase 7f: Write pre-serialized cell bytes directly into this page buffer
     /// 
     /// Rebuilds the page header and cell structure in-place without intermediate allocations.
-    /// Updates cell count and offsets directly in the mmap buffer.
-    pub fn write_cells(&mut self, page_type: PageType, cells: &[Cell]) -> Result<()> {
+    /// Cells must be pre-serialized; this method writes them directly to mmap.
+    /// Eliminates Cell enum from the write path by working only with raw bytes.
+    pub fn write_cells_bytes(&mut self, page_type: PageType, cell_bytes: &[&[u8]]) -> Result<()> {
         // Initialize page header (8 bytes for leaf, 12 for interior)
         let header_size = if page_type.is_leaf() { 8 } else { 12 };
         
@@ -243,7 +244,7 @@ impl<'a> PageMut<'a> {
         self.buffer[1..3].copy_from_slice(&0u16.to_be_bytes());
         
         // Write cell count
-        let cell_count = cells.len() as u16;
+        let cell_count = cell_bytes.len() as u16;
         self.buffer[3..5].copy_from_slice(&cell_count.to_be_bytes());
         
         // Write start of content area (initially just after header + cell pointers)
@@ -262,15 +263,12 @@ impl<'a> PageMut<'a> {
             self.buffer[8..12].copy_from_slice(&0u32.to_be_bytes());
         }
 
-        // Write cell pointers and cells
+        // Write cell pointers and pre-serialized cell bytes (Phase 7f: direct byte writing)
         let mut current_offset = content_start as usize;
         
-        for (i, cell) in cells.iter().enumerate() {
-            // Serialize the cell
-            let cell_bytes = cell.serialize()?;
-            
-            // Check we have space
-            if current_offset + cell_bytes.len() > self.buffer.len() {
+        for (i, cell_data) in cell_bytes.iter().enumerate() {
+            // Check we have space for this cell
+            if current_offset + cell_data.len() > self.buffer.len() {
                 return Err(Error::ParseError("Insufficient space for cell".into()));
             }
             
@@ -279,13 +277,30 @@ impl<'a> PageMut<'a> {
             self.buffer[ptr_offset..ptr_offset + 2]
                 .copy_from_slice(&(current_offset as u16).to_be_bytes());
             
-            // Write cell data
-            self.buffer[current_offset..current_offset + cell_bytes.len()]
-                .copy_from_slice(&cell_bytes);
-            current_offset += cell_bytes.len();
+            // Write pre-serialized cell data directly (Phase 7f: eliminate serialization step)
+            self.buffer[current_offset..current_offset + cell_data.len()]
+                .copy_from_slice(cell_data);
+            current_offset += cell_data.len();
         }
 
         Ok(())
+    }
+
+    /// Phase 7e compatibility: Write Cell objects (serializes then writes)
+    pub fn write_cells(&mut self, page_type: PageType, cells: &[Cell]) -> Result<()> {
+        // Serialize all cells first
+        let serialized_cells: Vec<Vec<u8>> = cells
+            .iter()
+            .map(|cell| cell.serialize())
+            .collect::<Result<Vec<_>>>()?;
+        
+        // Convert to byte slices
+        let byte_slices: Vec<&[u8]> = serialized_cells
+            .iter()
+            .map(|b| b.as_slice())
+            .collect();
+        
+        self.write_cells_bytes(page_type, &byte_slices)
     }
 }
 

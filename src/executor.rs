@@ -589,8 +589,8 @@ pub struct TableStorage {
     btree: BTree,
     /// Page number where this table is stored (Phase 7d: zero-copy reference)
     pub page_num: u32,
-    /// Cached cells from the page for now (will be removed in Phase 7g)
-    pub cells: Vec<Cell>,
+    /// Pre-serialized cell bytes (Phase 7f: eliminated Cell struct from write path)
+    pub cells_bytes: Vec<Vec<u8>>,
     /// Next available rowid
     next_rowid: u64,
 }
@@ -602,12 +602,12 @@ impl TableStorage {
             columns,
             btree: BTree::new(1),
             page_num: 1,
-            cells: Vec::new(),
+            cells_bytes: Vec::new(),
             next_rowid: 1,
         }
     }
 
-    /// Add a row to the table storage
+    /// Add a row to the table storage (Phase 7f: serialize cell bytes directly)
     fn add_row(&mut self, row: &Row) -> Result<()> {
         // Convert Row to Record using positional indexing
         let mut values = Vec::new();
@@ -626,32 +626,50 @@ impl TableStorage {
         let rowid = self.next_rowid;
         self.next_rowid += 1;
 
-        let cell = Cell::Leaf { rowid, payload };
-        // Phase 7d: Add cell directly to cached cells (not via page struct)
-        self.cells.push(cell);
+        // Phase 7f: Serialize cell bytes directly instead of creating Cell object
+        let cell_bytes = {
+            let mut buffer = Vec::new();
+            let payload_varint = crate::file_format::varint::write_varint(payload.len() as u64);
+            buffer.extend_from_slice(&payload_varint);
+            let rowid_varint = crate::file_format::varint::write_varint(rowid);
+            buffer.extend_from_slice(&rowid_varint);
+            buffer.extend_from_slice(&payload);
+            buffer
+        };
+        
+        self.cells_bytes.push(cell_bytes);
 
         Ok(())
     }
 
-    /// Get all rows from the table storage
+    /// Get all rows from the table storage (Phase 7f: parse bytes on-demand)
     fn get_all_rows(&self) -> Result<Vec<Row>> {
         let mut rows = Vec::new();
 
-        for cell in &self.cells {
-            if let Cell::Leaf { rowid: _, payload } = cell {
-                let record = Record::parse(payload)?;
-                let mut row = Row::new();
+        for cell_bytes in &self.cells_bytes {
+            // Phase 7f: Parse rowid and payload from pre-serialized bytes
+            let (payload_len, mut offset) = crate::file_format::varint::read_varint(cell_bytes)?;
+            let (rowid, rowid_len) = crate::file_format::varint::read_varint(&cell_bytes[offset..])?;
+            offset += rowid_len;
 
-                for (i, col_name) in self.columns.iter().enumerate() {
-                    if i < record.columns.len() {
-                        row.push((col_name.clone(), record.columns[i].clone()));
-                    } else {
-                        row.push((col_name.clone(), Value::Null));
-                    }
-                }
-
-                rows.push(row);
+            let payload_end = offset + payload_len as usize;
+            if payload_end > cell_bytes.len() {
+                return Err(Error::ParseError("Leaf cell payload out of bounds".into()));
             }
+
+            let payload = &cell_bytes[offset..payload_end];
+            let record = Record::parse(payload)?;
+            let mut row = Row::new();
+
+            for (i, col_name) in self.columns.iter().enumerate() {
+                if i < record.columns.len() {
+                    row.push((col_name.clone(), record.columns[i].clone()));
+                } else {
+                    row.push((col_name.clone(), Value::Null));
+                }
+            }
+
+            rows.push(row);
         }
 
         Ok(rows)
@@ -667,40 +685,62 @@ impl TableStorage {
         Ok(result)
     }
 
-    /// Delete rows matching a condition
+    /// Delete rows matching a condition (Phase 7f: work with pre-serialized bytes)
     fn delete_matching(&mut self, condition: &Option<Expression>, columns: &[String]) -> Result<usize> {
         let mut deleted = 0;
+        let mut keep_indices = Vec::new();
 
-        self.cells.retain(|cell| {
-            if let Cell::Leaf { rowid: _, payload } = cell {
-                if let Ok(record) = Record::parse(payload) {
-                    let mut row = Row::new();
-                    for (i, col_name) in self.columns.iter().enumerate() {
-                        if i < record.columns.len() {
-                            row.push((col_name.clone(), record.columns[i].clone()));
-                        }
-                    }
+        for (i, cell_bytes) in self.cells_bytes.iter().enumerate() {
+            // Phase 7f: Parse bytes to reconstruct row for condition evaluation
+            let (payload_len, mut offset) = crate::file_format::varint::read_varint(cell_bytes)?;
+            let (rowid, rowid_len) = crate::file_format::varint::read_varint(&cell_bytes[offset..])?;
+            offset += rowid_len;
 
-                    if let Some(cond) = condition {
-                        if let Ok(eval_result) = ExpressionEvaluator::eval(cond, &row, columns) {
-                            if ExpressionEvaluator::is_truthy(&eval_result) {
-                                deleted += 1;
-                                return false; // Remove this cell
-                            }
-                        }
-                    } else {
-                        deleted += 1;
-                        return false; // Remove if no condition (delete all)
+            let payload_end = offset + payload_len as usize;
+            if payload_end > cell_bytes.len() {
+                return Err(Error::ParseError("Leaf cell payload out of bounds".into()));
+            }
+
+            let payload = &cell_bytes[offset..payload_end];
+            if let Ok(record) = Record::parse(payload) {
+                let mut row = Row::new();
+                for (j, col_name) in self.columns.iter().enumerate() {
+                    if j < record.columns.len() {
+                        row.push((col_name.clone(), record.columns[j].clone()));
                     }
                 }
+
+                let should_delete = if let Some(cond) = condition {
+                    if let Ok(eval_result) = ExpressionEvaluator::eval(cond, &row, columns) {
+                        ExpressionEvaluator::is_truthy(&eval_result)
+                    } else {
+                        false
+                    }
+                } else {
+                    true // Delete all if no condition
+                };
+
+                if should_delete {
+                    deleted += 1;
+                } else {
+                    keep_indices.push(i);
+                }
+            } else {
+                keep_indices.push(i);
             }
-            true // Keep this cell
-        });
+        }
+
+        // Rebuild cells_bytes with kept cells
+        let mut new_cells = Vec::new();
+        for i in keep_indices {
+            new_cells.push(self.cells_bytes[i].clone());
+        }
+        self.cells_bytes = new_cells;
 
         Ok(deleted)
     }
 
-    /// Update rows matching a condition
+    /// Update rows matching a condition (Phase 7f: work with pre-serialized bytes)
     fn update_matching(
         &mut self,
         assignments: &[(String, Value)],
@@ -708,40 +748,65 @@ impl TableStorage {
         columns: &[String],
     ) -> Result<usize> {
         let mut updated = 0;
+        let mut new_cells_bytes = Vec::new();
 
-        for cell in &mut self.cells {
-            if let Cell::Leaf { rowid: _, payload } = cell {
-                if let Ok(mut record) = Record::parse(payload) {
-                    let mut row = Row::new();
-                    for (i, col_name) in self.columns.iter().enumerate() {
-                        if i < record.columns.len() {
-                            row.push((col_name.clone(), record.columns[i].clone()));
-                        }
-                    }
+        for cell_bytes in &self.cells_bytes {
+            // Phase 7f: Parse bytes to reconstruct row for condition evaluation
+            let (payload_len, mut offset) = crate::file_format::varint::read_varint(cell_bytes)?;
+            let (rowid, rowid_len) = crate::file_format::varint::read_varint(&cell_bytes[offset..])?;
+            offset += rowid_len;
 
-                    let should_update = if let Some(cond) = condition {
-                        ExpressionEvaluator::eval(cond, &row, columns)
-                            .map(|v| ExpressionEvaluator::is_truthy(&v))
-                            .unwrap_or(false)
-                    } else {
-                        true
-                    };
+            let payload_end = offset + payload_len as usize;
+            if payload_end > cell_bytes.len() {
+                return Err(Error::ParseError("Leaf cell payload out of bounds".into()));
+            }
 
-                    if should_update {
-                        for (col_name, value) in assignments {
-                            if let Some(idx) = self.columns.iter().position(|c| c == col_name) {
-                                if idx < record.columns.len() {
-                                    record.columns[idx] = value.clone();
-                                }
-                            }
-                        }
-                        *payload = record.serialize()?;
-                        updated += 1;
+            let payload = &cell_bytes[offset..payload_end];
+            if let Ok(mut record) = Record::parse(payload) {
+                let mut row = Row::new();
+                for (i, col_name) in self.columns.iter().enumerate() {
+                    if i < record.columns.len() {
+                        row.push((col_name.clone(), record.columns[i].clone()));
                     }
                 }
+
+                let should_update = if let Some(cond) = condition {
+                    ExpressionEvaluator::eval(cond, &row, columns)
+                        .map(|v| ExpressionEvaluator::is_truthy(&v))
+                        .unwrap_or(false)
+                } else {
+                    true
+                };
+
+                if should_update {
+                    for (col_name, value) in assignments {
+                        if let Some(idx) = self.columns.iter().position(|c| c == col_name) {
+                            if idx < record.columns.len() {
+                                record.columns[idx] = value.clone();
+                            }
+                        }
+                    }
+                    
+                    // Phase 7f: Serialize updated record directly to bytes
+                    let updated_payload = record.serialize()?;
+                    let mut updated_cell_bytes = Vec::new();
+                    let payload_varint = crate::file_format::varint::write_varint(updated_payload.len() as u64);
+                    updated_cell_bytes.extend_from_slice(&payload_varint);
+                    let rowid_varint = crate::file_format::varint::write_varint(rowid);
+                    updated_cell_bytes.extend_from_slice(&rowid_varint);
+                    updated_cell_bytes.extend_from_slice(&updated_payload);
+                    
+                    new_cells_bytes.push(updated_cell_bytes);
+                    updated += 1;
+                } else {
+                    new_cells_bytes.push(cell_bytes.clone());
+                }
+            } else {
+                new_cells_bytes.push(cell_bytes.clone());
             }
         }
 
+        self.cells_bytes = new_cells_bytes;
         Ok(updated)
     }
 }
@@ -938,7 +1003,7 @@ impl VirtualMachine {
         }
 
         // Only insert the table if we loaded any rows
-        if !storage.cells.is_empty() {
+        if !storage.cells_bytes.is_empty() {
             self.tables.insert(table_name.to_string(), storage);
         }
 
@@ -1204,16 +1269,24 @@ impl VirtualMachine {
                     *unique,
                 );
 
-                // Populate index with existing rows from the table
+                // Populate index with existing rows from the table (Phase 7f: parse bytes on-demand)
                 if let Some(table_storage) = self.tables.get(&table.to_string()) {
                     // Extract indexed column value for each row in the table
-                    for cell in &table_storage.cells {
-                        if let Cell::Leaf { rowid, payload } = cell {
-                            if let Ok(record) = Record::parse(payload) {
-                                // Find the column index for the indexed column
-                                if let Some(col_idx) = table_storage.columns.iter().position(|c| c == columns[0]) {
-                                    if col_idx < record.columns.len() {
-                                        let _ = index_storage.insert_entry(&record.columns[col_idx], *rowid);
+                    for cell_bytes in &table_storage.cells_bytes {
+                        // Phase 7f: Parse bytes to extract rowid and record
+                        if let Ok((payload_len, mut offset)) = crate::file_format::varint::read_varint(cell_bytes) {
+                            if let Ok((rowid, rowid_len)) = crate::file_format::varint::read_varint(&cell_bytes[offset..]) {
+                                offset += rowid_len;
+                                let payload_end = offset + payload_len as usize;
+                                if payload_end <= cell_bytes.len() {
+                                    let payload = &cell_bytes[offset..payload_end];
+                                    if let Ok(record) = Record::parse(payload) {
+                                        // Find the column index for the indexed column
+                                        if let Some(col_idx) = table_storage.columns.iter().position(|c| c == columns[0]) {
+                                            if col_idx < record.columns.len() {
+                                                let _ = index_storage.insert_entry(&record.columns[col_idx], rowid);
+                                            }
+                                        }
                                     }
                                 }
                             }
