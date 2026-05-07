@@ -84,6 +84,13 @@ Claude: please do not add to this, just tick the boxes!
 
 ## Phase 8: Remaining Tasks
 
+- [ ] Complete BTree implementation: Remove Cell, follow child pages, and implement page splitting
+  - Remove Cell enum from BTree struct (use pre-serialized bytes instead)
+  - Implement child page following for interior page traversal
+  - Implement page splitting on INSERT when pages overflow
+  - Handle B-tree balancing and rotation for multi-level trees
+  - Add integration tests for BTree with multiple page levels
+  - Goal: Fully functional multi-page B-tree supporting arbitrary dataset sizes
 - [ ] Check multithreading and multiprocess read/write. Check that fsync works by creating several Connection instances.
 - [ ] Investigate and implement the WAL (Write-Ahead Log). 
 
