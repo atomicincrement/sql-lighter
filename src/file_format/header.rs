@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
-const HEADER_SIZE: usize = 100;
+pub const HEADER_SIZE: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextEncoding {
@@ -28,65 +28,238 @@ impl TextEncoding {
     }
 }
 
-/// SQLite database file header (100 bytes)
-#[derive(Debug, Clone)]
-pub struct FileHeader {
-    pub magic: &'static [u8],
-    pub page_size: u32,  // Changed from u16 to u32 to support 65536
-    pub write_version: u8,
-    pub read_version: u8,
-    pub reserved_per_page: u8,
-    pub max_payload_fraction: u8,
-    pub min_payload_fraction: u8,
-    pub leaf_payload_fraction: u8,
-    pub change_counter: u32,
-    pub page_count: u32,
-    pub freelist_trunk: u32,
-    pub freelist_pages: u32,
-    pub schema_cookie: u32,
-    pub schema_format: u32,
-    pub cache_size: u32,
-    pub largest_root: u32,
-    pub text_encoding: TextEncoding,
-    pub user_version: u32,
-    pub incremental_vacuum: u32,
-    pub app_id: u32,
-    pub version_valid: u32,
-    pub version_number: u32,
+/// Reference-based SQLite file header wrapper (100 bytes)
+/// Reads all fields directly from the byte slice without copying.
+#[derive(Debug, Clone, Copy)]
+pub struct FileHeaderRef<'a> {
+    buffer: &'a [u8],
 }
 
-impl Default for FileHeader {
-    fn default() -> Self {
-        Self {
-            magic: SQLITE_MAGIC,
-            page_size: 4096,
-            write_version: 1,
-            read_version: 1,
-            reserved_per_page: 0,
-            max_payload_fraction: 64,
-            min_payload_fraction: 32,
-            leaf_payload_fraction: 32,
-            change_counter: 0,
-            page_count: 0,
-            freelist_trunk: 0,
-            freelist_pages: 0,
-            schema_cookie: 0,
-            schema_format: 4,
-            cache_size: 0,
-            largest_root: 0,
-            text_encoding: TextEncoding::Utf8,
-            user_version: 0,
-            incremental_vacuum: 0,
-            app_id: 0,
-            version_valid: 0,
-            version_number: 0,
+impl<'a> FileHeaderRef<'a> {
+    /// Create a new reference to a file header buffer
+    pub fn new(buffer: &'a [u8]) -> Result<Self> {
+        if buffer.len() < HEADER_SIZE {
+            return Err(Error::ParseError("Buffer too small for file header".into()));
         }
+        if &buffer[0..16] != SQLITE_MAGIC {
+            return Err(Error::ParseError("Invalid SQLite magic number".into()));
+        }
+        Ok(Self { buffer })
+    }
+
+    pub fn magic(&self) -> &[u8] {
+        &self.buffer[0..16]
+    }
+
+    pub fn page_size(&self) -> u32 {
+        let raw = u16::from_be_bytes([self.buffer[16], self.buffer[17]]);
+        if raw == 1 { 65536 } else { raw as u32 }
+    }
+
+    pub fn write_version(&self) -> u8 {
+        self.buffer[18]
+    }
+
+    pub fn read_version(&self) -> u8 {
+        self.buffer[19]
+    }
+
+    pub fn reserved_per_page(&self) -> u8 {
+        self.buffer[20]
+    }
+
+    pub fn max_payload_fraction(&self) -> u8 {
+        self.buffer[21]
+    }
+
+    pub fn min_payload_fraction(&self) -> u8 {
+        self.buffer[22]
+    }
+
+    pub fn leaf_payload_fraction(&self) -> u8 {
+        self.buffer[23]
+    }
+
+    pub fn change_counter(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[24], self.buffer[25], self.buffer[26], self.buffer[27]])
+    }
+
+    pub fn page_count(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[28], self.buffer[29], self.buffer[30], self.buffer[31]])
+    }
+
+    pub fn freelist_trunk(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[32], self.buffer[33], self.buffer[34], self.buffer[35]])
+    }
+
+    pub fn freelist_pages(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[36], self.buffer[37], self.buffer[38], self.buffer[39]])
+    }
+
+    pub fn schema_cookie(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[40], self.buffer[41], self.buffer[42], self.buffer[43]])
+    }
+
+    pub fn schema_format(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[44], self.buffer[45], self.buffer[46], self.buffer[47]])
+    }
+
+    pub fn cache_size(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[48], self.buffer[49], self.buffer[50], self.buffer[51]])
+    }
+
+    pub fn largest_root(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[52], self.buffer[53], self.buffer[54], self.buffer[55]])
+    }
+
+    pub fn text_encoding(&self) -> Result<TextEncoding> {
+        let raw = u32::from_be_bytes([self.buffer[56], self.buffer[57], self.buffer[58], self.buffer[59]]);
+        TextEncoding::from_u32(raw)
+    }
+
+    pub fn user_version(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[60], self.buffer[61], self.buffer[62], self.buffer[63]])
+    }
+
+    pub fn incremental_vacuum(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[64], self.buffer[65], self.buffer[66], self.buffer[67]])
+    }
+
+    pub fn app_id(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[68], self.buffer[69], self.buffer[70], self.buffer[71]])
+    }
+
+    pub fn version_valid(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[92], self.buffer[93], self.buffer[94], self.buffer[95]])
+    }
+
+    pub fn version_number(&self) -> u32 {
+        u32::from_be_bytes([self.buffer[96], self.buffer[97], self.buffer[98], self.buffer[99]])
     }
 }
 
-impl FileHeader {
-    /// Read header from file
-    pub fn read<R: Read + Seek>(reader: &mut R) -> Result<Self> {
+/// Mutable reference-based SQLite file header wrapper
+/// Writes all fields directly to the byte slice without copying.
+pub struct FileHeaderMut<'a> {
+    buffer: &'a mut [u8],
+}
+
+impl<'a> FileHeaderMut<'a> {
+    /// Create a new mutable reference to a file header buffer
+    pub fn new(buffer: &'a mut [u8]) -> Result<Self> {
+        if buffer.len() < HEADER_SIZE {
+            return Err(Error::ParseError("Buffer too small for file header".into()));
+        }
+        Ok(Self { buffer })
+    }
+
+    /// Initialize with SQLite magic number and defaults
+    pub fn init(&mut self) {
+        self.buffer[0..16].copy_from_slice(SQLITE_MAGIC);
+        self.set_write_version(1);
+        self.set_read_version(1);
+        self.set_page_size(4096);
+        self.set_schema_format(4);
+        self.set_text_encoding(TextEncoding::Utf8);
+    }
+
+    pub fn as_ref(&self) -> FileHeaderRef<'_> {
+        FileHeaderRef { buffer: self.buffer }
+    }
+
+    pub fn set_page_size(&mut self, value: u32) {
+        let page_size_field = if value == 65536 { 1u16 } else { value as u16 };
+        self.buffer[16..18].copy_from_slice(&page_size_field.to_be_bytes());
+    }
+
+    pub fn set_write_version(&mut self, value: u8) {
+        self.buffer[18] = value;
+    }
+
+    pub fn set_read_version(&mut self, value: u8) {
+        self.buffer[19] = value;
+    }
+
+    pub fn set_reserved_per_page(&mut self, value: u8) {
+        self.buffer[20] = value;
+    }
+
+    pub fn set_max_payload_fraction(&mut self, value: u8) {
+        self.buffer[21] = value;
+    }
+
+    pub fn set_min_payload_fraction(&mut self, value: u8) {
+        self.buffer[22] = value;
+    }
+
+    pub fn set_leaf_payload_fraction(&mut self, value: u8) {
+        self.buffer[23] = value;
+    }
+
+    pub fn set_change_counter(&mut self, value: u32) {
+        self.buffer[24..28].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_page_count(&mut self, value: u32) {
+        self.buffer[28..32].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_freelist_trunk(&mut self, value: u32) {
+        self.buffer[32..36].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_freelist_pages(&mut self, value: u32) {
+        self.buffer[36..40].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_schema_cookie(&mut self, value: u32) {
+        self.buffer[40..44].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_schema_format(&mut self, value: u32) {
+        self.buffer[44..48].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_cache_size(&mut self, value: u32) {
+        self.buffer[48..52].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_largest_root(&mut self, value: u32) {
+        self.buffer[52..56].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_text_encoding(&mut self, value: TextEncoding) {
+        self.buffer[56..60].copy_from_slice(&value.to_u32().to_be_bytes());
+    }
+
+    pub fn set_user_version(&mut self, value: u32) {
+        self.buffer[60..64].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_incremental_vacuum(&mut self, value: u32) {
+        self.buffer[64..68].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_app_id(&mut self, value: u32) {
+        self.buffer[68..72].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_version_valid(&mut self, value: u32) {
+        self.buffer[92..96].copy_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn set_version_number(&mut self, value: u32) {
+        self.buffer[96..100].copy_from_slice(&value.to_be_bytes());
+    }
+}
+
+
+/// Helper functions for file header I/O
+pub mod io {
+    use super::*;
+
+    /// Read header from file into a buffer
+    pub fn read_header<R: Read + Seek>(reader: &mut R) -> Result<[u8; HEADER_SIZE]> {
         reader
             .seek(SeekFrom::Start(0))
             .map_err(|e| Error::IoError(e.to_string()))?;
@@ -96,123 +269,17 @@ impl FileHeader {
             .read_exact(&mut buffer)
             .map_err(|e| Error::IoError(e.to_string()))?;
 
-        Self::parse(&buffer)
+        Ok(buffer)
     }
 
-    /// Parse header from buffer
-    pub fn parse(buffer: &[u8]) -> Result<Self> {
-        if buffer.len() < HEADER_SIZE {
-            return Err(Error::ParseError("Buffer too small for file header".into()));
-        }
-
-        // Verify magic number
-        if &buffer[0..16] != SQLITE_MAGIC {
-            return Err(Error::ParseError("Invalid SQLite magic number".into()));
-        }
-
-        let page_size_raw = u16::from_be_bytes([buffer[16], buffer[17]]);
-        let page_size = if page_size_raw == 1 { 65536u32 } else { page_size_raw as u32 };
-
-        let write_version = buffer[18];
-        let read_version = buffer[19];
-        let reserved_per_page = buffer[20];
-        let max_payload_fraction = buffer[21];
-        let min_payload_fraction = buffer[22];
-        let leaf_payload_fraction = buffer[23];
-
-        let change_counter = u32::from_be_bytes([buffer[24], buffer[25], buffer[26], buffer[27]]);
-        let page_count = u32::from_be_bytes([buffer[28], buffer[29], buffer[30], buffer[31]]);
-        let freelist_trunk = u32::from_be_bytes([buffer[32], buffer[33], buffer[34], buffer[35]]);
-        let freelist_pages = u32::from_be_bytes([buffer[36], buffer[37], buffer[38], buffer[39]]);
-        let schema_cookie = u32::from_be_bytes([buffer[40], buffer[41], buffer[42], buffer[43]]);
-        let schema_format = u32::from_be_bytes([buffer[44], buffer[45], buffer[46], buffer[47]]);
-        let cache_size = u32::from_be_bytes([buffer[48], buffer[49], buffer[50], buffer[51]]);
-        let largest_root = u32::from_be_bytes([buffer[52], buffer[53], buffer[54], buffer[55]]);
-
-        let text_encoding_raw = u32::from_be_bytes([buffer[56], buffer[57], buffer[58], buffer[59]]);
-        let text_encoding = TextEncoding::from_u32(text_encoding_raw)?;
-
-        let user_version = u32::from_be_bytes([buffer[60], buffer[61], buffer[62], buffer[63]]);
-        let incremental_vacuum = u32::from_be_bytes([buffer[64], buffer[65], buffer[66], buffer[67]]);
-        let app_id = u32::from_be_bytes([buffer[68], buffer[69], buffer[70], buffer[71]]);
-        let version_valid = u32::from_be_bytes([buffer[92], buffer[93], buffer[94], buffer[95]]);
-        let version_number = u32::from_be_bytes([buffer[96], buffer[97], buffer[98], buffer[99]]);
-
-        Ok(Self {
-            magic: SQLITE_MAGIC,
-            page_size,
-            write_version,
-            read_version,
-            reserved_per_page,
-            max_payload_fraction,
-            min_payload_fraction,
-            leaf_payload_fraction,
-            change_counter,
-            page_count,
-            freelist_trunk,
-            freelist_pages,
-            schema_cookie,
-            schema_format,
-            cache_size,
-            largest_root,
-            text_encoding,
-            user_version,
-            incremental_vacuum,
-            app_id,
-            version_valid,
-            version_number,
-        })
-    }
-
-    /// Write header to file
-    pub fn write<W: Write + Seek>(&self, writer: &mut W) -> Result<()> {
+    /// Write header buffer to file
+    pub fn write_header<W: Write + Seek>(writer: &mut W, buffer: &[u8; HEADER_SIZE]) -> Result<()> {
         writer
             .seek(SeekFrom::Start(0))
             .map_err(|e| Error::IoError(e.to_string()))?;
-
-        let mut buffer = vec![0u8; HEADER_SIZE];
-
-        // Magic number
-        buffer[0..16].copy_from_slice(SQLITE_MAGIC);
-
-        // Page size (special: 1 means 65536)
-        let page_size_field = if self.page_size == 65536 { 1u16 } else { self.page_size as u16 };
-        buffer[16..18].copy_from_slice(&page_size_field.to_be_bytes());
-
-        // Versions
-        buffer[18] = self.write_version;
-        buffer[19] = self.read_version;
-
-        // Payload fractions
-        buffer[20] = self.reserved_per_page;
-        buffer[21] = self.max_payload_fraction;
-        buffer[22] = self.min_payload_fraction;
-        buffer[23] = self.leaf_payload_fraction;
-
-        // Counters and sizes
-        buffer[24..28].copy_from_slice(&self.change_counter.to_be_bytes());
-        buffer[28..32].copy_from_slice(&self.page_count.to_be_bytes());
-        buffer[32..36].copy_from_slice(&self.freelist_trunk.to_be_bytes());
-        buffer[36..40].copy_from_slice(&self.freelist_pages.to_be_bytes());
-        buffer[40..44].copy_from_slice(&self.schema_cookie.to_be_bytes());
-        buffer[44..48].copy_from_slice(&self.schema_format.to_be_bytes());
-        buffer[48..52].copy_from_slice(&self.cache_size.to_be_bytes());
-        buffer[52..56].copy_from_slice(&self.largest_root.to_be_bytes());
-
-        // Text encoding
-        buffer[56..60].copy_from_slice(&self.text_encoding.to_u32().to_be_bytes());
-
-        // Version info
-        buffer[60..64].copy_from_slice(&self.user_version.to_be_bytes());
-        buffer[64..68].copy_from_slice(&self.incremental_vacuum.to_be_bytes());
-        buffer[68..72].copy_from_slice(&self.app_id.to_be_bytes());
-        buffer[92..96].copy_from_slice(&self.version_valid.to_be_bytes());
-        buffer[96..100].copy_from_slice(&self.version_number.to_be_bytes());
-
         writer
-            .write_all(&buffer)
+            .write_all(buffer)
             .map_err(|e| Error::IoError(e.to_string()))?;
-
         Ok(())
     }
 }
@@ -222,34 +289,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_header() {
-        let header = FileHeader::default();
-        assert_eq!(header.page_size, 4096);
-        assert_eq!(header.write_version, 1);
-        assert_eq!(header.text_encoding, TextEncoding::Utf8);
+    fn test_default_header() -> Result<()> {
+        let mut buffer = [0u8; HEADER_SIZE];
+        let mut header = FileHeaderMut::new(&mut buffer)?;
+        header.init();
+
+        let header_ref = header.as_ref();
+        assert_eq!(header_ref.page_size(), 4096);
+        assert_eq!(header_ref.write_version(), 1);
+        assert_eq!(header_ref.text_encoding()?, TextEncoding::Utf8);
+
+        Ok(())
     }
 
     #[test]
-    fn test_parse_header() -> Result<()> {
-        let mut buffer = vec![0u8; 100];
+    fn test_parse_header_ref() -> Result<()> {
+        let mut buffer = vec![0u8; HEADER_SIZE];
         buffer[0..16].copy_from_slice(SQLITE_MAGIC);
         buffer[16..18].copy_from_slice(&4096u16.to_be_bytes());
         buffer[18] = 1;
         buffer[19] = 1;
         buffer[56..60].copy_from_slice(&1u32.to_be_bytes());
 
-        let header = FileHeader::parse(&buffer)?;
-        assert_eq!(header.page_size, 4096);
-        assert_eq!(header.text_encoding, TextEncoding::Utf8);
+        let header = FileHeaderRef::new(&buffer)?;
+        assert_eq!(header.page_size(), 4096);
+        assert_eq!(header.text_encoding()?, TextEncoding::Utf8);
 
         Ok(())
     }
 
     #[test]
     fn test_invalid_magic() {
-        let mut buffer = vec![0u8; 100];
+        let mut buffer = [0u8; HEADER_SIZE];
         buffer[0] = 0xFF;
 
-        assert!(FileHeader::parse(&buffer).is_err());
+        assert!(FileHeaderRef::new(&buffer).is_err());
+    }
+
+    #[test]
+    fn test_set_and_get_fields() -> Result<()> {
+        let mut buffer = [0u8; HEADER_SIZE];
+        let mut header_mut = FileHeaderMut::new(&mut buffer)?;
+        header_mut.init();
+        header_mut.set_page_count(42);
+        header_mut.set_change_counter(100);
+
+        let header_ref = header_mut.as_ref();
+        assert_eq!(header_ref.page_count(), 42);
+        assert_eq!(header_ref.change_counter(), 100);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_large_page_size() -> Result<()> {
+        let mut buffer = [0u8; HEADER_SIZE];
+        let mut header_mut = FileHeaderMut::new(&mut buffer)?;
+        header_mut.init();
+        header_mut.set_page_size(65536);
+
+        let header_ref = header_mut.as_ref();
+        assert_eq!(header_ref.page_size(), 65536);
+
+        Ok(())
     }
 }
