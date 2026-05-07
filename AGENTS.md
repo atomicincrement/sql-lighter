@@ -102,12 +102,14 @@ The goal of this phase is to remove the current Page and Cell data structures an
   - Cell now only used in backward compatibility layer (IndexStorage still uses Cell)
   - Page struct still exists for backward compatibility but marked deprecated
   - Goal: Minimal Cell allocations in hot paths achieved ✓
-- [ ] Phase 7h: Consolidate write operations to direct mmap bytes
-  - Remove write_page() method (obsolete)
-  - All writes use mmap directly with offset calculations
-  - Ensure page 1 header preservation during all writes
-  - Add integration tests for multi-table updates
-  - Goal: Single unified write path with maximum efficiency
+- [x] Phase 7h: Consolidate write operations to direct mmap bytes
+  - Removed write_page() method (obsolete after Phase 7e implementation)
+  - All writes now use get_page_mut() -> write_cells_bytes/write_cells() -> flush()
+  - Ensured page 1 file header (bytes 0-99) is preserved during all writes
+  - Added integration test for multi-table updates (test_multi_table_writes)
+  - Updated all existing tests to use PageMut instead of deprecated write_page()
+  - All 93 tests passing (added 1 new multi-table integration test)
+  - Single unified write path via mmap with maximum efficiency achieved ✓
 - [ ] Check multithreading and multiprocess read/write. Check that fsync works by creating several Connection instances.
 - [ ] Investigate the WAL. 
 

@@ -222,41 +222,8 @@ impl DatabaseFile {
         PageRef::new(page_data, page_num)
     }
 
-    /// Write a page to the database
-    pub fn write_page(&mut self, page: &Page) -> Result<()> {
-        let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
-        let page_size = header_ref.page_size() as usize;
-
-        // For page 1, the B-tree page data starts at byte 100 (after file header)
-        // For other pages, they start at their calculated offset
-        let (page_offset, write_size) = if page.page_num == 1 {
-            // Page 1: starts at offset 100, and only the page portion (not file header)
-            (HEADER_SIZE, page_size - HEADER_SIZE)
-        } else {
-            // Other pages: start at standard offset, full page size
-            ((page.page_num as usize - 1) * page_size, page_size)
-        };
-
-        // Ensure mmap is large enough
-        let page_end = page_offset + write_size;
-        if page_end > self.mmap.len() {
-            return Err(Error::ParseError("Page offset out of bounds".into()));
-        }
-
-        let buffer = page.serialize(page_size)?;
-        
-        // For page 1, serialize includes a file header area (bytes 0-100) that we should skip
-        // since the real file header is at mmap[0..100]
-        if page.page_num == 1 {
-            // Copy only the page data portion (bytes 100 onwards from the serialized buffer)
-            self.mmap[page_offset..page_end].copy_from_slice(&buffer[HEADER_SIZE..HEADER_SIZE + write_size]);
-        } else {
-            // For other pages, copy the entire serialized buffer
-            self.mmap[page_offset..page_end].copy_from_slice(&buffer);
-        }
-
-        Ok(())
-    }
+    /// Phase 7h: All writes now go directly to mmap via PageMut (see get_page_mut)
+    /// Use get_page_mut() -> write_cells_bytes() -> flush() instead
 
     /// Flush all changes to disk
     pub fn flush(&mut self) -> Result<()> {
@@ -349,21 +316,15 @@ mod tests {
 
     #[test]
     fn test_zero_cache_immediate_persistence() -> Result<()> {
-        // Phase 7c: Verify that pages are written directly to mmap without caching
+        // Phase 7h: Verify that pages are written directly to mmap via PageMut without caching
         let temp = NamedTempFile::new().map_err(|e| Error::IoError(e.to_string()))?;
         let path = temp.path();
 
-        // Create initial page
-        let mut page = Page {
-            page_num: 1,
-            page_type: PageType::TableLeaf,
-            cells: vec![],
-        };
-
-        // Write with first connection
+        // Write with first connection using direct mmap writes via PageMut (Phase 7h)
         {
             let mut db = DatabaseFile::create(path, 4096)?;
-            db.write_page(&page)?;
+            let mut page_mut = db.get_page_mut(1)?;
+            page_mut.write_cells(PageType::TableLeaf, &[])?;
             db.flush()?;
         }
 
@@ -380,30 +341,28 @@ mod tests {
 
     #[test]
     fn test_multiple_connections_concurrent_access() -> Result<()> {
-        // Phase 7c: Verify multiple connections can safely access the same file
+        // Phase 7h: Verify multiple connections can safely access the same file
         let temp = NamedTempFile::new().map_err(|e| Error::IoError(e.to_string()))?;
         let path = temp.path();
 
-        // Create database with a valid page
+        // Create database with a valid page using direct mmap writes via PageMut (Phase 7h)
         {
             let mut db = DatabaseFile::create(path, 4096)?;
-            let page = Page {
-                page_num: 1,
-                page_type: PageType::TableLeaf,
-                cells: vec![],
-            };
-            db.write_page(&page)?;
+            let mut page_mut = db.get_page_mut(1)?;
+            page_mut.write_cells(PageType::TableLeaf, &[])?;
             db.flush()?;
         }
 
-        // Connection 1: Write data
+        // Connection 1: Read and modify
         {
             let mut db1 = DatabaseFile::open(path)?;
-            let mut page = db1.read_page(1)?;
+            let page = db1.read_page(1)?;
             // Verify we can read what was written
             assert_eq!(page.page_type, PageType::TableLeaf);
-            page.page_type = PageType::TableInterior;  // Modify it
-            db1.write_page(&page)?;
+            
+            // Modify via direct mmap write (Phase 7h: page 1 header preserved)
+            let mut page_mut = db1.get_page_mut(1)?;
+            page_mut.write_cells(PageType::TableInterior, &[])?;
             db1.flush()?;
         }
 
@@ -419,21 +378,15 @@ mod tests {
 
     #[test]
     fn test_fsync_durability() -> Result<()> {
-        // Phase 7c: Verify fsync ensures data persistence
+        // Phase 7h: Verify fsync ensures data persistence with direct mmap writes
         let temp = NamedTempFile::new().map_err(|e| Error::IoError(e.to_string()))?;
         let path = temp.path();
 
-        // Write and fsync
+        // Write and fsync using direct mmap writes via PageMut (Phase 7h)
         {
             let mut db = DatabaseFile::create(path, 4096)?;
-            
-            let mut page = Page {
-                page_num: 1,
-                page_type: PageType::TableLeaf,
-                cells: vec![],
-            };
-            
-            db.write_page(&page)?;
+            let mut page_mut = db.get_page_mut(1)?;
+            page_mut.write_cells(PageType::TableLeaf, &[])?;
             db.flush()?;  // This should call fsync via mmap.flush()
         }
 
@@ -444,6 +397,72 @@ mod tests {
             assert_eq!(page.page_type, PageType::TableLeaf);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_multi_table_writes() -> Result<()> {
+        // Phase 7h: Integration test for multi-table updates with direct mmap writes
+        let temp = NamedTempFile::new().map_err(|e| Error::IoError(e.to_string()))?;
+        let path = temp.path();
+        
+        // Create and initialize database with page 1
+        {
+            let mut db = DatabaseFile::create(path, 4096)?;
+            let mut page_mut = db.get_page_mut(1)?;
+            page_mut.write_cells(PageType::TableLeaf, &[])?;
+            db.flush()?;
+        }
+        
+        // Reopen with larger file and write to multiple pages via direct mmap (Phase 7h)
+        {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(|e| Error::IoError(e.to_string()))?;
+            
+            // Expand file to hold 3 pages (4096 byte pages)
+            let new_size = 100 + (4096 * 3);
+            file.set_len(new_size as u64)
+                .map_err(|e| Error::IoError(e.to_string()))?;
+            drop(file);
+            
+            let mut db = DatabaseFile::open(path)?;
+            
+            // Write to page 1 (table leaf)
+            {
+                let mut page_mut = db.get_page_mut(1)?;
+                page_mut.write_cells(PageType::TableLeaf, &[])?;
+            }
+            
+            // Write to page 2 (table interior)
+            {
+                let mut page_mut = db.get_page_mut(2)?;
+                page_mut.write_cells(PageType::TableInterior, &[])?;
+            }
+            
+            // Write to page 3 (table leaf again)
+            {
+                let mut page_mut = db.get_page_mut(3)?;
+                page_mut.write_cells(PageType::TableLeaf, &[])?;
+            }
+            
+            db.flush()?;
+        }
+        
+        // Verify all pages were written correctly
+        {
+            let mut db = DatabaseFile::open(path)?;
+            let page1 = db.read_page(1)?;
+            let page2 = db.read_page(2)?;
+            let page3 = db.read_page(3)?;
+            
+            assert_eq!(page1.page_type, PageType::TableLeaf);
+            assert_eq!(page2.page_type, PageType::TableInterior);
+            assert_eq!(page3.page_type, PageType::TableLeaf);
+        }
+        
         Ok(())
     }
 }
