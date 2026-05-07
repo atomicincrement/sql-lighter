@@ -2,6 +2,8 @@
 
 A multiphase project to investigate SQLite's file format, port it to Rust, and create a high-performance database engine.
 
+With our rust version, We will use the same interface as rusqlite.
+
 ## Phase 1: Research & Discovery
 
 **Objective:** Understand SQLite internals and existing Rust alternatives.
@@ -15,11 +17,11 @@ A multiphase project to investigate SQLite's file format, port it to Rust, and c
 
 **Objective:** Deep dive into SQLite's architecture and document key components.
 
-- [ ] Analyse SQLite file format → `docs/file_format.md` (sufficient detail to implement reader/writer)
-- [ ] Analyse SQL dialect and supported syntax → `docs/syntax.md`
-- [ ] Analyse query planner architecture → `docs/planner.md`
-- [ ] Analyse SQL execution engine → `docs/engine.md`
-- [ ] Analyse plugin mechanism → `docs/plugins.md`
+- [x] Analyse SQLite file format → `docs/file_format.md` (sufficient detail to implement reader/writer)
+- [x] Analyse SQL dialect and supported syntax → `docs/syntax.md`
+- [x] Analyse query planner architecture → `docs/planner.md`
+- [x] Analyse SQL execution engine → `docs/engine.md`
+- [x] Analyse plugin mechanism → `docs/plugins.md`
 
 ## Phase 3: File Format Implementation
 
