@@ -35,6 +35,131 @@ impl PageType {
     }
 }
 
+/// Reference-based B-tree page wrapper for read-only access
+/// Provides zero-copy views into page header and cells
+#[derive(Debug, Copy, Clone)]
+pub struct PageRef<'a> {
+    page_num: u32,
+    buffer: &'a [u8],
+}
+
+impl<'a> PageRef<'a> {
+    /// Create a new reference to a page buffer
+    pub fn new(buffer: &'a [u8], page_num: u32) -> Result<Self> {
+        if buffer.is_empty() {
+            return Err(Error::ParseError("Empty buffer for page".into()));
+        }
+        Ok(Self { page_num, buffer })
+    }
+
+    pub fn page_num(&self) -> u32 {
+        self.page_num
+    }
+
+    /// Get immutable reference to page header
+    pub fn header(&self) -> Result<PageHeaderRef<'_>> {
+        PageHeaderRef::new(self.buffer)
+    }
+
+    /// Get the page type
+    pub fn page_type(&self) -> Result<PageType> {
+        self.header()?.page_type()
+    }
+
+    /// Parse all cells from this page
+    pub fn cells(&self) -> Result<Vec<Cell>> {
+        let header = self.header()?;
+        let header_size = header.header_size()?;
+
+        // Cell pointers come after the header
+        let cell_pointer_start = if self.page_num == 1 { 100 } else { header_size };
+        let cell_count = header.cell_count();
+
+        let mut cells = Vec::new();
+
+        // Read cell pointers and cells
+        for i in 0..cell_count as usize {
+            let ptr_offset = cell_pointer_start + (i * 2);
+            if ptr_offset + 2 > self.buffer.len() {
+                return Err(Error::ParseError("Cell pointer out of bounds".into()));
+            }
+
+            let cell_offset = u16::from_be_bytes([
+                self.buffer[ptr_offset],
+                self.buffer[ptr_offset + 1],
+            ]) as usize;
+
+            if cell_offset >= self.buffer.len() {
+                return Err(Error::ParseError("Cell offset out of bounds".into()));
+            }
+
+            let cell = Cell::parse(&self.buffer[cell_offset..], &header)?;
+            cells.push(cell);
+        }
+
+        Ok(cells)
+    }
+
+    pub fn is_leaf(&self) -> Result<bool> {
+        Ok(self.page_type()?.is_leaf())
+    }
+
+    pub fn is_interior(&self) -> Result<bool> {
+        Ok(self.page_type()?.is_interior())
+    }
+}
+
+/// Mutable reference-based B-tree page wrapper for read-write access
+pub struct PageMut<'a> {
+    page_num: u32,
+    buffer: &'a mut [u8],
+}
+
+impl<'a> PageMut<'a> {
+    /// Create a new mutable reference to a page buffer
+    pub fn new(buffer: &'a mut [u8], page_num: u32) -> Result<Self> {
+        if buffer.is_empty() {
+            return Err(Error::ParseError("Empty buffer for page".into()));
+        }
+        Ok(Self { page_num, buffer })
+    }
+
+    pub fn page_num(&self) -> u32 {
+        self.page_num
+    }
+
+    /// Get immutable reference to page header
+    pub fn header(&self) -> Result<PageHeaderRef<'_>> {
+        PageHeaderRef::new(self.buffer)
+    }
+
+    /// Get mutable reference to page header
+    pub fn header_mut(&mut self) -> Result<PageHeaderMut<'_>> {
+        PageHeaderMut::new(self.buffer)
+    }
+
+    /// Get page as immutable reference
+    pub fn as_ref(&self) -> PageRef<'_> {
+        PageRef {
+            page_num: self.page_num,
+            buffer: self.buffer,
+        }
+    }
+
+    /// Parse all cells from this page
+    pub fn cells(&self) -> Result<Vec<Cell>> {
+        self.as_ref().cells()
+    }
+
+    pub fn is_leaf(&self) -> Result<bool> {
+        self.as_ref().is_leaf()
+    }
+
+    pub fn is_interior(&self) -> Result<bool> {
+        self.as_ref().is_interior()
+    }
+}
+
 /// Reference-based B-tree page header wrapper
 /// Leaf header: 8 bytes, Interior header: 12 bytes
 #[derive(Debug, Clone, Copy)]
@@ -151,81 +276,50 @@ impl<'a> PageHeaderMut<'a> {
     }
 }
 
-/// B-tree page
+/// Owned B-tree page with mutable cells for in-memory operations
 #[derive(Debug, Clone)]
 pub struct Page {
     pub page_num: u32,
-    pub header_buffer: Vec<u8>,  // 8 or 12 bytes depending on page type
+    pub page_type: PageType,
     pub cells: Vec<Cell>,
-    pub raw_data: Vec<u8>,
 }
 
 impl Page {
+    /// Create a new page
+    pub fn new(page_num: u32, page_type: PageType) -> Self {
+        Self {
+            page_num,
+            page_type,
+            cells: Vec::new(),
+        }
+    }
+
+    /// Parse a page from a buffer
     pub fn parse(buffer: &[u8], page_num: u32) -> Result<Self> {
-        if buffer.is_empty() {
-            return Err(Error::ParseError("Empty buffer for page".into()));
-        }
-
-        let header_ref = PageHeaderRef::new(buffer)?;
-        let header_size = header_ref.header_size()?;
-
-        // Extract and store the header
-        let header_buffer = buffer[0..header_size].to_vec();
-
-        // Cell pointers come after the header
-        let cell_pointer_start = if page_num == 1 { 100 } else { header_size };
-        let cell_count = header_ref.cell_count();
-        let _cell_pointer_end = cell_pointer_start + (cell_count as usize) * 2;
-
-        let mut cells = Vec::new();
-
-        // Read cell pointers and cells
-        for i in 0..cell_count as usize {
-            let ptr_offset = cell_pointer_start + (i * 2);
-            if ptr_offset + 2 > buffer.len() {
-                return Err(Error::ParseError("Cell pointer out of bounds".into()));
-            }
-
-            let cell_offset = u16::from_be_bytes([buffer[ptr_offset], buffer[ptr_offset + 1]]) as usize;
-
-            if cell_offset >= buffer.len() {
-                return Err(Error::ParseError("Cell offset out of bounds".into()));
-            }
-
-            let cell = Cell::parse(&buffer[cell_offset..], &header_ref)?;
-            cells.push(cell);
-        }
-
+        let page_ref = PageRef::new(buffer, page_num)?;
+        let page_type = page_ref.page_type()?;
+        let cells = page_ref.cells()?;
         Ok(Self {
             page_num,
-            header_buffer,
+            page_type,
             cells,
-            raw_data: buffer.to_vec(),
         })
     }
 
-    /// Get immutable reference to page header
-    pub fn header(&self) -> Result<PageHeaderRef<'_>> {
-        PageHeaderRef::new(&self.header_buffer)
-    }
-
-    /// Get mutable reference to page header
-    pub fn header_mut(&mut self) -> Result<PageHeaderMut<'_>> {
-        PageHeaderMut::new(&mut self.header_buffer)
-    }
-
+    /// Serialize page into a buffer of given size
     pub fn serialize(&self, page_size: usize) -> Result<Vec<u8>> {
-        let header_ref = self.header()?;
-        let header_size = header_ref.header_size()?;
         let mut buffer = vec![0u8; page_size];
 
         // For first page, file header takes first 100 bytes
         let header_start = if self.page_num == 1 { 100 } else { 0 };
 
-        // Write page header
-        buffer[header_start..header_start + header_size].copy_from_slice(&self.header_buffer);
+        // Initialize page header at the appropriate offset
+        let mut header_mut = PageHeaderMut::new(&mut buffer[header_start..header_start + 12])?;
+        header_mut.init(self.page_type);
+        header_mut.set_cell_count(self.cells.len() as u16);
 
         // Calculate cell pointer array start
+        let header_size = if self.page_type.is_interior() { 12 } else { 8 };
         let cell_ptr_start = header_start + header_size;
 
         // Write cells (from the end of the page, working backwards)
@@ -235,43 +329,44 @@ impl Page {
             let cell_data = cell.serialize()?;
             current_cell_offset -= cell_data.len();
 
-            buffer[current_cell_offset..current_cell_offset + cell_data.len()].copy_from_slice(&cell_data);
+            buffer[current_cell_offset..current_cell_offset + cell_data.len()]
+                .copy_from_slice(&cell_data);
 
             // Write cell pointer
             let ptr_offset = cell_ptr_start + (i * 2);
-            buffer[ptr_offset..ptr_offset + 2].copy_from_slice(&(current_cell_offset as u16).to_be_bytes());
+            buffer[ptr_offset..ptr_offset + 2]
+                .copy_from_slice(&(current_cell_offset as u16).to_be_bytes());
         }
+
+        // Update cell_start field in header
+        let mut header_mut = PageHeaderMut::new(&mut buffer[header_start..header_start + 12])?;
+        header_mut.set_cell_start(cell_ptr_start as u16);
 
         Ok(buffer)
     }
 
-    pub fn add_cell(&mut self, cell: Cell) -> Result<()> {
+    /// Add a cell to this page
+    pub fn add_cell(&mut self, cell: Cell) {
         self.cells.push(cell);
-        let mut header_mut = self.header_mut()?;
-        let count = header_mut.as_ref().cell_count();
-        header_mut.set_cell_count(count + 1);
-        Ok(())
     }
 
-    pub fn remove_cell(&mut self, index: usize) -> Result<Option<Cell>> {
+    /// Remove a cell by index
+    pub fn remove_cell(&mut self, index: usize) -> Option<Cell> {
         if index < self.cells.len() {
-            let mut header_mut = self.header_mut()?;
-            let count = header_mut.as_ref().cell_count();
-            header_mut.set_cell_count(count - 1);
-            Ok(Some(self.cells.remove(index)))
+            Some(self.cells.remove(index))
         } else {
-            Ok(None)
+            None
         }
     }
 
-    pub fn is_leaf(&self) -> Result<bool> {
-        let header = self.header()?;
-        Ok(header.page_type()?.is_leaf())
+    /// Check if page is a leaf
+    pub fn is_leaf(&self) -> bool {
+        self.page_type.is_leaf()
     }
 
-    pub fn is_interior(&self) -> Result<bool> {
-        let header = self.header()?;
-        Ok(header.page_type()?.is_interior())
+    /// Check if page is interior
+    pub fn is_interior(&self) -> bool {
+        self.page_type.is_interior()
     }
 }
 
