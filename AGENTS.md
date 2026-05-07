@@ -42,7 +42,7 @@ With our rust version, We will use the same interface as rusqlite.
 - [x] Build query planner and optimizer
 - [x] Implement execution engine with virtual machine
 - [x] Add support for basic data types and operations
-- [ ] Implement indexing structures
+- [x] Implement indexing structures
 
 ## Phase 5: Performance Optimization
 

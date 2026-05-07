@@ -108,6 +108,19 @@ pub enum ExecutionPlan<'a> {
     Distinct {
         input: Box<ExecutionPlan<'a>>,
     },
+    /// Create index on table columns
+    /// Example: `CREATE INDEX idx_user_email ON users (email)`
+    CreateIndex {
+        index: &'a str,
+        table: &'a str,
+        columns: Vec<&'a str>,
+        unique: bool,
+    },
+    /// Drop index
+    /// Example: `DROP INDEX idx_user_email`
+    DropIndex {
+        index: &'a str,
+    },
     /// Composite plan (for multiple operations)
     /// Example: Transaction with multiple statements: BEGIN; INSERT ...; UPDATE ...; COMMIT;
     Composite(Vec<ExecutionPlan<'a>>),
@@ -148,13 +161,29 @@ impl Default for TableStats {
     }
 }
 
+/// Index definition
+/// References: B-tree index structure from SQLite file format
+#[derive(Debug, Clone)]
+pub struct IndexDef<'a> {
+    /// Index name
+    pub name: &'a str,
+    /// Table being indexed
+    pub table: &'a str,
+    /// Columns in index (order matters)
+    pub columns: Vec<&'a str>,
+    /// Whether index enforces uniqueness
+    pub unique: bool,
+}
+
 /// Query planner - converts AST to execution plans
 /// References: SQLite query planner - https://www.sqlite.org/queryplanner.html
 pub struct Planner<'a> {
     /// Table statistics for cost estimation
     table_stats: HashMap<&'a str, TableStats>,
-    /// Available indexes (table -> columns)
-    indexes: HashMap<&'a str, Vec<Vec<&'a str>>>,
+    /// Available indexes (index_name -> index definition)
+    indexes: HashMap<&'a str, IndexDef<'a>>,
+    /// Table to indexes mapping (table -> index names)
+    table_indexes: HashMap<&'a str, Vec<&'a str>>,
 }
 
 impl<'a> Planner<'a> {
@@ -163,6 +192,7 @@ impl<'a> Planner<'a> {
         Self {
             table_stats: HashMap::new(),
             indexes: HashMap::new(),
+            table_indexes: HashMap::new(),
         }
     }
 
@@ -173,9 +203,26 @@ impl<'a> Planner<'a> {
     }
 
     /// Register an index on a table
+    /// index_name: the index name
+    /// table: the table being indexed
     /// columns: the columns that are indexed
-    pub fn with_index(mut self, table: &'a str, columns: Vec<&'a str>) -> Self {
-        self.indexes.entry(table).or_insert_with(Vec::new).push(columns);
+    pub fn with_index(
+        mut self,
+        index_name: &'a str,
+        table: &'a str,
+        columns: Vec<&'a str>,
+    ) -> Self {
+        let index_def = IndexDef {
+            name: index_name,
+            table,
+            columns,
+            unique: false,
+        };
+        self.indexes.insert(index_name, index_def);
+        self.table_indexes
+            .entry(table)
+            .or_insert_with(Vec::new)
+            .push(index_name);
         self
     }
 
@@ -247,10 +294,10 @@ impl<'a> Planner<'a> {
         // Reference: https://use-the-index-luke.com/sql/where-clause
         if let Some(where_expr) = &select.where_clause {
             // Optimization: check if WHERE can use indexes
-            if self.can_use_index_for_condition(where_expr, select.from.as_ref().unwrap()) {
+            if let Some(index_name) = self.find_usable_index(where_expr, select.from.as_ref().unwrap()) {
                 plan = ExecutionPlan::IndexScan {
                     table: select.from.as_ref().unwrap().table,
-                    index: "primary", // Would determine actual index in optimizer
+                    index: index_name,
                     condition: Some(where_expr.clone()),
                 };
             } else {
@@ -325,20 +372,20 @@ impl<'a> Planner<'a> {
         })
     }
 
-    /// Check if a WHERE condition can use an index
+    /// Check if a WHERE condition can use an index and return the index name
     /// Reference: Query optimizer index selection - https://www.sqlite.org/optoverview.html
-    fn can_use_index_for_condition(
+    fn find_usable_index(
         &self,
         _condition: &Expression<'a>,
         table: &TableOrSubquery<'a>,
-    ) -> bool {
-        // Future: implement index selection based on:
-        // 1. Available indexes on the table
-        // 2. Condition predicates
-        // 3. Estimated selectivity
-        
-        // For now, only use indexes if explicitly registered
-        self.indexes.contains_key(table.table)
+    ) -> Option<&'a str> {
+        // Get indexes for this table
+        if let Some(index_names) = self.table_indexes.get(table.table) {
+            // Return first usable index (in real system, would score all indexes)
+            // References: Cost-based index selection from https://use-the-index-luke.com/
+            return index_names.first().copied();
+        }
+        None
     }
 
     /// Extract column names from result columns
@@ -676,5 +723,52 @@ mod tests {
             _ => Err(Error::PlanError("Expected Project".to_string())),
         }
     }
+
+    #[test]
+    fn test_plan_with_index_scan() -> Result<()> {
+        let stmt = parse_query("SELECT * FROM users WHERE id = 1")?;
+        let planner = Planner::new()
+            .with_index("idx_users_id", "users", vec!["id"]);
+
+        let plan = planner.plan(&stmt)?;
+
+        // Should produce: Project -> IndexScan (due to registered index)
+        match plan {
+            ExecutionPlan::Project {
+                input: index_plan, ..
+            } => match *index_plan {
+                ExecutionPlan::IndexScan {
+                    index,
+                    table,
+                    condition: Some(_),
+                } => {
+                    assert_eq!(table, "users");
+                    assert_eq!(index, "idx_users_id");
+                    Ok(())
+                }
+                _ => Err(Error::PlanError("Expected IndexScan".to_string())),
+            },
+            _ => Err(Error::PlanError("Expected Project".to_string())),
+        }
+    }
+
+    #[test]
+    fn test_index_metadata() -> Result<()> {
+        let planner = Planner::new()
+            .with_index("idx_email", "users", vec!["email"])
+            .with_index("idx_name_email", "users", vec!["name", "email"]);
+
+        // Verify planner can find indexes
+        let index1 = planner.indexes.get("idx_email");
+        assert!(index1.is_some());
+        assert_eq!(index1.unwrap().columns, vec!["email"]);
+
+        let index2 = planner.indexes.get("idx_name_email");
+        assert!(index2.is_some());
+        assert_eq!(index2.unwrap().columns, vec!["name", "email"]);
+
+        Ok(())
+    }
 }
+
 

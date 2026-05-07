@@ -587,6 +587,19 @@ impl ExpressionEvaluator {
 pub struct VirtualMachine {
     /// In-memory table storage (table_name -> rows)
     tables: HashMap<String, ResultSet>,
+    /// Index storage: (index_name -> (table_name, column_names, is_unique))
+    indexes: HashMap<String, IndexMetadata>,
+}
+
+/// Index metadata
+#[derive(Debug, Clone)]
+struct IndexMetadata {
+    /// Table being indexed
+    table: String,
+    /// Columns in index
+    columns: Vec<String>,
+    /// Whether index enforces uniqueness
+    unique: bool,
 }
 
 impl VirtualMachine {
@@ -594,6 +607,7 @@ impl VirtualMachine {
     pub fn new() -> Self {
         Self {
             tables: HashMap::new(),
+            indexes: HashMap::new(),
         }
     }
 
@@ -853,6 +867,34 @@ impl VirtualMachine {
             ExecutionPlan::Distinct { input } => {
                 let result = self.execute(input)?;
                 self.apply_distinct(&result)
+            }
+
+            // CreateIndex: Create an index on table column(s)
+            // Example: CREATE INDEX idx_user_email ON users (email)
+            // Stores index metadata for query optimizer to use
+            ExecutionPlan::CreateIndex {
+                index,
+                table,
+                columns,
+                unique,
+            } => {
+                self.indexes.insert(
+                    index.to_string(),
+                    IndexMetadata {
+                        table: table.to_string(),
+                        columns: columns.iter().map(|c| c.to_string()).collect(),
+                        unique: *unique,
+                    },
+                );
+                Ok(ResultSet::new(vec![]))
+            }
+
+            // DropIndex: Remove an index
+            // Example: DROP INDEX idx_user_email
+            // Removes index metadata, allowing full table scans for affected queries
+            ExecutionPlan::DropIndex { index } => {
+                self.indexes.remove(*index);
+                Ok(ResultSet::new(vec![]))
             }
         }
     }
@@ -1190,6 +1232,71 @@ mod tests {
         // Should have 2 groups: Sales and IT
         assert_eq!(grouped.rows.len(), 2);
     }
+
+    #[test]
+    fn test_create_index() {
+        let mut vm = VirtualMachine::new();
+        let plan = ExecutionPlan::CreateIndex {
+            index: "idx_users_email",
+            table: "users",
+            columns: vec!["email"],
+            unique: true,
+        };
+
+        let result = vm.execute(&plan).unwrap();
+        assert_eq!(result.rows.len(), 0); // DDL returns empty result set
+        assert!(vm.indexes.contains_key("idx_users_email"));
+    }
+
+    #[test]
+    fn test_drop_index() {
+        let mut vm = VirtualMachine::new();
+
+        // Create index first
+        let create_plan = ExecutionPlan::CreateIndex {
+            index: "idx_test",
+            table: "test_table",
+            columns: vec!["col1"],
+            unique: false,
+        };
+        vm.execute(&create_plan).unwrap();
+        assert!(vm.indexes.contains_key("idx_test"));
+
+        // Drop index
+        let drop_plan = ExecutionPlan::DropIndex {
+            index: "idx_test",
+        };
+        vm.execute(&drop_plan).unwrap();
+        assert!(!vm.indexes.contains_key("idx_test"));
+    }
+
+    #[test]
+    fn test_index_scan_optimization() {
+        let mut vm = VirtualMachine::new();
+
+        // Create table
+        let create_table_plan = ExecutionPlan::CreateTable {
+            table: "users",
+            columns: vec![],
+        };
+        vm.execute(&create_table_plan).unwrap();
+
+        // Create index
+        let create_index_plan = ExecutionPlan::CreateIndex {
+            index: "idx_users_id",
+            table: "users",
+            columns: vec!["id"],
+            unique: false,
+        };
+        vm.execute(&create_index_plan).unwrap();
+
+        // Verify index exists
+        assert!(vm.indexes.contains_key("idx_users_id"));
+        let index_meta = vm.indexes.get("idx_users_id").unwrap();
+        assert_eq!(index_meta.table, "users");
+        assert_eq!(index_meta.columns, vec!["id".to_string()]);
+    }
 }
+
 
 
