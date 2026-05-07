@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use super::varint::read_varint;
-use super::page::PageHeader;
+use super::page::{PageHeaderRef, PageType};
 
 /// A B-tree cell (either interior or leaf)
 #[derive(Debug, Clone)]
@@ -20,13 +20,14 @@ pub enum Cell {
 }
 
 impl Cell {
-    pub fn parse(buffer: &[u8], header: &PageHeader) -> Result<Self> {
+    pub fn parse(buffer: &[u8], header: &PageHeaderRef) -> Result<Self> {
         if buffer.is_empty() {
             return Err(Error::ParseError("Empty buffer for cell".into()));
         }
 
-        match header.page_type {
-            super::page::PageType::IndexInterior | super::page::PageType::TableInterior => {
+        let page_type = header.page_type()?;
+        match page_type {
+            PageType::IndexInterior | PageType::TableInterior => {
                 // Interior cell: 4-byte child pointer + key
                 if buffer.len() < 4 {
                     return Err(Error::ParseError("Interior cell too short".into()));
@@ -40,7 +41,7 @@ impl Cell {
                     child_pointer,
                 })
             }
-            super::page::PageType::IndexLeaf | super::page::PageType::TableLeaf => {
+            PageType::IndexLeaf | PageType::TableLeaf => {
                 // Leaf cell: varint payload length + varint rowid + payload
                 let (payload_len, mut offset) = read_varint(buffer)?;
                 let (rowid, rowid_len) = read_varint(&buffer[offset..])?;

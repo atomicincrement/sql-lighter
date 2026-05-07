@@ -30,7 +30,7 @@ impl BTree {
         }
 
         // If not found on this page
-        if page.is_interior() {
+        if page.is_interior()? {
             // In a real implementation, we would follow the child pointer
             // For now, return not found
             Ok(None)
@@ -53,7 +53,9 @@ impl BTree {
         }
 
         page.cells.insert(insert_pos, cell);
-        page.header.cell_count += 1;
+        let mut header_mut = page.header_mut()?;
+        let count = header_mut.as_ref().cell_count();
+        header_mut.set_cell_count(count + 1);
 
         Ok(())
     }
@@ -62,8 +64,7 @@ impl BTree {
     pub fn delete(&self, page: &mut Page, key: u64) -> Result<bool> {
         for (i, cell) in page.cells.iter().enumerate() {
             if cell.get_key() == key {
-                page.cells.remove(i);
-                page.header.cell_count -= 1;
+                page.remove_cell(i)?;
                 return Ok(true);
             }
         }
@@ -97,22 +98,19 @@ impl BTree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::page::{PageHeader, PageType};
+    use super::super::page::{PageHeaderMut, PageType};
 
-    fn create_test_page() -> Page {
-        Page {
+    fn create_test_page() -> Result<Page> {
+        let mut header_buffer = vec![0u8; 12];
+        let mut header_mut = PageHeaderMut::new(&mut header_buffer)?;
+        header_mut.init(PageType::TableLeaf);
+
+        Ok(Page {
             page_num: 1,
-            header: PageHeader {
-                page_type: PageType::TableLeaf,
-                first_freeblock: 0,
-                cell_count: 0,
-                cell_start: 0,
-                fragmented_free: 0,
-                right_pointer: None,
-            },
+            header_buffer,
             cells: Vec::new(),
             raw_data: Vec::new(),
-        }
+        })
     }
 
     #[test]
@@ -124,7 +122,7 @@ mod tests {
     #[test]
     fn test_insert_and_search() -> Result<()> {
         let btree = BTree::new(1);
-        let mut page = create_test_page();
+        let mut page = create_test_page()?;
 
         let cell = Cell::Leaf {
             rowid: 42,
@@ -143,7 +141,7 @@ mod tests {
     #[test]
     fn test_delete() -> Result<()> {
         let btree = BTree::new(1);
-        let mut page = create_test_page();
+        let mut page = create_test_page()?;
 
         let cell = Cell::Leaf {
             rowid: 99,
@@ -161,9 +159,9 @@ mod tests {
     }
 
     #[test]
-    fn test_keys_in_order() {
+    fn test_keys_in_order() -> Result<()> {
         let _btree = BTree::new(1);
-        let mut page = create_test_page();
+        let mut page = create_test_page()?;
 
         page.cells.push(Cell::Leaf {
             rowid: 30,
@@ -180,5 +178,7 @@ mod tests {
 
         let keys = BTree::keys_in_order(&page);
         assert_eq!(keys, vec![10, 20, 30]);
+
+        Ok(())
     }
 }
