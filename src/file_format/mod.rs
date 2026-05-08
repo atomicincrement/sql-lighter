@@ -92,15 +92,15 @@ impl DatabaseFile {
         let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         let page_size = header_ref.page_size() as usize;
 
-        // For page 1, the B-tree page data starts at byte 100 (after file header)
+        // For page 1, include the file header (bytes 0-100) followed by page data (100-4096)
         // For other pages, they start at their calculated offset
-        let page_offset = if page_num == 1 {
-            HEADER_SIZE
+        let (page_offset, page_end) = if page_num == 1 {
+            (0, page_size)
         } else {
-            (page_num as usize - 1) * page_size
+            let offset = (page_num as usize - 1) * page_size;
+            (offset, offset + page_size)
         };
 
-        let page_end = page_offset + page_size;
         if page_end > self.mmap.len() {
             return Err(Error::ParseError("Page offset out of bounds".into()));
         }
@@ -117,15 +117,16 @@ impl DatabaseFile {
         let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
         let page_size = header_ref.page_size() as usize;
 
-        // For page 1, the B-tree page data starts at byte 100 (after file header)
-        // For other pages, they start at their calculated offset
-        let page_offset = if page_num == 1 {
-            HEADER_SIZE
+        // For page 1, include the file header (bytes 0-100) followed by page data
+        // The B-tree page starts at byte 0, with the file header in the first 100 bytes
+        // For other pages, they start at their calculated offset (without any header)
+        let (page_offset, page_end) = if page_num == 1 {
+            (0, page_size)
         } else {
-            (page_num as usize - 1) * page_size
+            let offset = (page_num as usize - 1) * page_size;
+            (offset, offset + page_size)
         };
 
-        let page_end = page_offset + page_size;
         if page_end > self.mmap.len() {
             return Err(Error::ParseError("Page offset out of bounds".into()));
         }

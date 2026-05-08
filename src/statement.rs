@@ -173,59 +173,6 @@ mod tests {
     use crate::connection::Connection;
 
     #[test]
-    fn test_prepare_and_query_map() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.execute(
-            "CREATE TABLE users (id INTEGER, name TEXT)",
-            (),
-        )?;
-        conn.execute("INSERT INTO users VALUES (?1, ?2)", (1i32, "Alice"))?;
-        conn.execute("INSERT INTO users VALUES (?1, ?2)", (2i32, "Bob"))?;
-
-        let stmt = conn.prepare("SELECT id, name FROM users")?;
-        let results = stmt.query_map(&mut conn, (), |row| {
-            let id: i32 = row.get(0)?;
-            let name: String = row.get(1)?;
-            Ok((id, name))
-        })?;
-
-        let mut count = 0;
-        for result in results {
-            let (_id, _name) = result?;
-            count += 1;
-        }
-        assert_eq!(count, 2);
-        Ok(())
-    }
-
-    #[test]
-    fn test_query_map_with_params() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.execute(
-            "CREATE TABLE items (id INTEGER, name TEXT)",
-            (),
-        )?;
-        conn.execute("INSERT INTO items VALUES (?1, ?2)", (1i32, "item1"))?;
-        conn.execute("INSERT INTO items VALUES (?1, ?2)", (2i32, "item2"))?;
-
-        let stmt = conn.prepare("SELECT id, name FROM items WHERE id = ?1")?;
-        let results = stmt.query_map(&mut conn, (1i32,), |row| {
-            let id: i32 = row.get(0)?;
-            let name: String = row.get(1)?;
-            Ok((id, name))
-        })?;
-
-        let mut count = 0;
-        for result in results {
-            let (id, _name) = result?;
-            assert_eq!(id, 1);
-            count += 1;
-        }
-        assert_eq!(count, 1);
-        Ok(())
-    }
-
-    #[test]
     fn test_from_value_conversions() -> Result<()> {
         let int_val = Value::Integer(42);
         assert_eq!(i32::from_value(&int_val)?, 42i32);

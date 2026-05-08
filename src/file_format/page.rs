@@ -43,6 +43,32 @@ pub struct PageRef<'a> {
     buffer: &'a [u8],
 }
 
+// From the SQLite file format documentation:
+//
+// The format of a cell depends on which kind of b-tree page the cell appears on. The following table shows the elements of a cell, in order of appearance, for the various b-tree page types.
+
+// Table B-Tree Leaf Cell (header 0x0d):
+
+// A varint which is the total number of bytes of payload, including any overflow
+// A varint which is the integer key, a.k.a. "rowid"
+// The initial portion of the payload that does not spill to overflow pages.
+// A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
+// Table B-Tree Interior Cell (header 0x05):
+
+// A 4-byte big-endian page number which is the left child pointer.
+// A varint which is the integer key
+// Index B-Tree Leaf Cell (header 0x0a):
+
+// A varint which is the total number of bytes of key payload, including any overflow
+// The initial portion of the payload that does not spill to overflow pages.
+// A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
+// Index B-Tree Interior Cell (header 0x02):
+
+// A 4-byte big-endian page number which is the left child pointer.
+// A varint which is the total number of bytes of key payload, including any overflow
+// The initial portion of the payload that does not spill to overflow pages.
+// A 4-byte big-endian integer page number for the first page of the overflow page list - omitted if all payload fits on the b-tree page.
+
 impl<'a> PageRef<'a> {
     /// Create a new reference to a page buffer
     pub fn new(buffer: &'a [u8], page_num: u32) -> Result<Self> {
@@ -57,8 +83,11 @@ impl<'a> PageRef<'a> {
     }
 
     /// Get immutable reference to page header
+    /// For page 1, the page header starts at offset 100 (after the file header)
+    /// For other pages, it starts at offset 0
     pub fn header(&self) -> Result<PageHeaderRef<'_>> {
-        PageHeaderRef::new(self.buffer)
+        let header_offset = if self.page_num == 1 { 100 } else { 0 };
+        PageHeaderRef::new(&self.buffer[header_offset..])
     }
 
     /// Get the page type
@@ -160,8 +189,9 @@ impl<'a> PageRef<'a> {
             return Ok(None);
         }
 
-        let header_size = header.header_size()?;
-        let cell_pointer_start = if self.page_num == 1 { 100 } else { header_size };
+        // For page 1: file header (100 bytes) + leaf page header (8 bytes) = 108
+        // For other pages: page header (8 bytes) = 8
+        let cell_pointer_start = if self.page_num == 1 { 108 } else { 8 };
         let cell_count = header.cell_count();
 
         Ok(Some(LeafCellIter::new(self.buffer, cell_pointer_start, cell_count)))
@@ -176,8 +206,9 @@ impl<'a> PageRef<'a> {
             return Ok(None);
         }
 
-        let header_size = header.header_size()?;
-        let cell_pointer_start = if self.page_num == 1 { 100 } else { header_size };
+        // For page 1: file header (100 bytes) + interior page header (12 bytes) = 112
+        // For other pages: page header (12 bytes) = 12
+        let cell_pointer_start = if self.page_num == 1 { 112 } else { 12 };
         let cell_count = header.cell_count();
 
         Ok(Some(InteriorCellIter::new(self.buffer, cell_pointer_start, cell_count)))
@@ -212,13 +243,19 @@ impl<'a> PageMut<'a> {
     }
 
     /// Get immutable reference to page header
+    /// For page 1, the page header starts at offset 100 (after the file header)
+    /// For other pages, it starts at offset 0
     pub fn header(&self) -> Result<PageHeaderRef<'_>> {
-        PageHeaderRef::new(self.buffer)
+        let header_offset = if self.page_num == 1 { 100 } else { 0 };
+        PageHeaderRef::new(&self.buffer[header_offset..])
     }
 
     /// Get mutable reference to page header
+    /// For page 1, the page header starts at offset 100 (after the file header)
+    /// For other pages, it starts at offset 0
     pub fn header_mut(&mut self) -> Result<PageHeaderMut<'_>> {
-        PageHeaderMut::new(self.buffer)
+        let header_offset = if self.page_num == 1 { 100 } else { 0 };
+        PageHeaderMut::new(&mut self.buffer[header_offset..])
     }
 
     /// Get page as immutable reference

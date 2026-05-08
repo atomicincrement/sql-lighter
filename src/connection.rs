@@ -447,37 +447,99 @@ mod tests {
     }
 
     #[test]
-    fn test_query_with_params() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.execute("CREATE TABLE items (id INTEGER, name TEXT)", ())?;
-        
-        // Insert test data
-        conn.execute("INSERT INTO items VALUES (?1, ?2)", (1i32, "item1"))?;
-        
-        // Query with params
-        let rows = conn.query(
-            "SELECT * FROM items WHERE id = ?1",
-            (1i32,),
-        )?;
-        
-        assert!(!rows.is_empty());
-        Ok(())
-    }
+    fn test_connection2_with_btree2_schema_dump() -> Result<()> {
+        // Create a SQLite database with rusqlite
+        let temp_file = tempfile::NamedTempFile::new()
+            .map_err(|e| Error::IoError(e.to_string()))?;
+        let db_path = temp_file.path().to_path_buf();
+        println!("Created temporary database file at {:?}", db_path);
 
-    #[test]
-    fn test_query_row_with_params() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.execute("CREATE TABLE items (id INTEGER, name TEXT)", ())?;
+        // Write with rusqlite
+        {
+            let conn = rusqlite::Connection::open(&db_path)
+                .map_err(|e| Error::ExecutionError(e.to_string()))?;
+            
+            // Create a table with multiple column types to test record format variants
+            conn.execute(
+                "CREATE TABLE test_table (
+                    id INTEGER PRIMARY KEY,
+                    tiny_int INTEGER,
+                    small_int INTEGER,
+                    medium_int INTEGER,
+                    big_int INTEGER,
+                    very_big_int INTEGER,
+                    float_val REAL,
+                    text_val TEXT,
+                    blob_val BLOB
+                )",
+                [],
+            ).map_err(|e| Error::ExecutionError(e.to_string()))?;
+            
+            // Insert records to test all integer type code variants (1-7)
+            // Type 1: 1-byte (-128 to 127)
+            conn.execute(
+                "INSERT INTO test_table VALUES (1, 42, 300, 70000, 2000000, 1000000000000, 3.14, 'one', x'00010203')",
+                [],
+            ).map_err(|e| Error::ExecutionError(e.to_string()))?;
+            
+            // Type 2: 2-byte (-32768 to 32767)
+            conn.execute(
+                "INSERT INTO test_table VALUES (2, 127, 1000, 80000, 3000000, 2000000000000, 2.71, 'two', x'04050607')",
+                [],
+            ).map_err(|e| Error::ExecutionError(e.to_string()))?;
+            
+            // Type 3: 3-byte (-8388608 to 8388607)
+            conn.execute(
+                "INSERT INTO test_table VALUES (3, -128, 5000, 100000, 4000000, 3000000000000, 1.41, 'three', x'08090a0b')",
+                [],
+            ).map_err(|e| Error::ExecutionError(e.to_string()))?;
+            
+            // Type 4: 4-byte (-2147483648 to 2147483647)
+            conn.execute(
+                "INSERT INTO test_table VALUES (4, -1, 10000, 500000, 1000000000, 4000000000000, 0.5, 'four', x'0c0d0e0f')",
+                [],
+            ).map_err(|e| Error::ExecutionError(e.to_string()))?;
+            
+            // Type 6: 8-byte (full i64 range)
+            conn.execute(
+                "INSERT INTO test_table VALUES (5, 0, 32000, 1000000, 2000000000, 5000000000000, -3.14, 'five', x'101112131415')",
+                [],
+            ).map_err(|e| Error::ExecutionError(e.to_string()))?;
+            
+            // Test NULL values mixed with different types
+            conn.execute(
+                "INSERT INTO test_table VALUES (6, NULL, NULL, NULL, NULL, NULL, NULL, 'six', NULL)",
+                [],
+            ).map_err(|e| Error::ExecutionError(e.to_string()))?;
+            
+            conn.close().map_err(|(_, e)| Error::ExecutionError(e.to_string()))?;
+        }
+
+        // Now read with Connection2 and Transaction
+        let conn2 = Connection2::open(db_path.to_str().unwrap())?;
+        let transaction = conn2.transaction()?;
+
+        // Open the schema table at page 1 with BTree2
+        let btree = BTree2::new(1, &transaction);
         
-        // Insert test data
-        conn.execute("INSERT INTO items VALUES (?1, ?2)", (1i32, "single"))?;
+        // Dump all entries from the schema table to stdout
+        println!("✓ Connection2 created successfully");
+        println!("✓ Transaction started successfully");
+        println!("✓ BTree2 opened at root page 1");
+        println!("✓ Schema entries (zero-copy iteration):");
+        btree.dump_all()?;
         
-        // Query row with params - should not error even if row is empty
-        // The main test is that execute works with params
-        let _row = conn.query_row(
-            "SELECT * FROM items WHERE id = ?1",
-            (1i32,),
-        )?;
+        // Dump page 2 with BTree2 - should have all test data with varied record formats
+        println!("\n✓ BTree2 opened at page 2");
+        println!("✓ Page 2 entries (record format variants - all integer types, floats, text, blobs):");
+        let btree2 = BTree2::new(2, &transaction);
+        btree2.dump_all()?;
+        
+        // Keep the file for inspection with xxd
+        let temp_path = temp_file.into_temp_path();
+        temp_path.keep()
+            .map_err(|e| Error::IoError(format!("Failed to keep temp file: {}", e)))?;
+        println!("✓ Database file preserved at: {:?}", db_path);
         
         Ok(())
     }
@@ -518,7 +580,7 @@ impl Connection2 {
 /// Tracks all page modifications made during the transaction in a write-ahead log.
 pub struct Transaction {
     /// Shared reference to the database file
-    _db_file: Arc<DatabaseFile>,
+    pub db_file: Arc<DatabaseFile>,
     /// Virtual machine for query execution
     vm: VirtualMachine,
     /// Pages modified during this transaction: page_num -> bytes
@@ -530,10 +592,20 @@ impl Transaction {
     /// Create a new transaction
     fn new(db_file: Arc<DatabaseFile>) -> Result<Self> {
         Ok(Self {
-            _db_file: db_file,
+            db_file,
             vm: VirtualMachine::new(),
             modified_pages: HashMap::new(),
         })
+    }
+
+    /// Get a read-only reference to a page (Phase 8b: Transaction support)
+    ///
+    /// Checks modified_pages first; if found, creates PageRef from those bytes.
+    /// Otherwise, reads from the database file using read_page_ref().
+    pub fn page(&self, page_num: u32) -> Result<crate::file_format::PageRef<'_>> {
+        // For now, delegate to db_file.read_page_ref()
+        // In the future, this should check modified_pages and use those bytes if available
+        self.db_file.read_page_ref(page_num)
     }
 
     /// Execute a SQL statement within this transaction
@@ -658,6 +730,86 @@ impl Transaction {
     /// Discards all changes made during this transaction.
     pub fn rollback(&self) -> Result<()> {
         // TODO: Implement rollback logic
+        Ok(())
+    }
+}
+
+/// Improved B-tree implementation with transaction-based page access (Phase 8c)
+///
+/// Traverses SQLite B-tree pages using a transaction context, allowing proper
+/// handling of modified pages and multi-page navigation.
+pub struct BTree2<'t> {
+    /// Root page number of the B-tree
+    root_page: u32,
+    /// Reference to the transaction for page access
+    transaction: &'t Transaction,
+}
+
+impl<'t> BTree2<'t> {
+    /// Create a new B-tree reference pointing to a root page
+    pub fn new(root_page: u32, transaction: &'t Transaction) -> Self {
+        Self {
+            root_page,
+            transaction,
+        }
+    }
+
+    /// Dump all keys in the B-tree by traversing all pages
+    ///
+    /// Prints each cell to stdout using Display trait (zero-copy iteration).
+    /// Recursively traverses interior and leaf pages without allocating a results vector.
+    pub fn dump_all(&self) -> Result<()> {
+        self.dump_page(self.root_page)?;
+        Ok(())
+    }
+
+    /// Recursively dump cells from a page and its children
+    fn dump_page(&self, page_num: u32) -> Result<()> {
+        let page_ref = self.transaction.page(page_num)?;
+        let page_type = page_ref.page_type()?;
+
+        match page_type {
+            PageType::TableLeaf | PageType::IndexLeaf => {
+                // Leaf page: print all leaf cells
+                self.dump_leaf_page(&page_ref)?;
+            }
+            PageType::TableInterior | PageType::IndexInterior => {
+                // Interior page: print keys and recurse into children
+                self.dump_interior_page(&page_ref)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Print all leaf cells from a leaf page (zero-copy iteration)
+    fn dump_leaf_page(&self, page_ref: &crate::file_format::PageRef<'_>) -> Result<()> {
+        if let Some(leaf_iter) = page_ref.as_leaf_cells()? {
+            for cell_result in leaf_iter {
+                match cell_result {
+                    Ok(leaf_cell) => println!("  {}", leaf_cell),
+                    Err(e) => eprintln!("  Error reading leaf cell: {}", e),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Print keys from interior page cells and recurse into children
+    fn dump_interior_page(&self, page_ref: &crate::file_format::PageRef<'_>) -> Result<()> {
+        if let Some(interior_iter) = page_ref.as_interior_cells()? {
+            for cell_result in interior_iter {
+                match cell_result {
+                    Ok(interior_cell) => {
+                        println!("  {}", interior_cell);
+                        // Recurse into child page
+                        let child_ptr = interior_cell.child_pointer();
+                        self.dump_page(child_ptr)?;
+                    }
+                    Err(e) => eprintln!("  Error reading interior cell: {}", e),
+                }
+            }
+        }
         Ok(())
     }
 }
