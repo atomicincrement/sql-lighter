@@ -177,28 +177,20 @@ impl<'t> BTree<'t> {
 /// for all leaf cells. Uses a stack-based traversal to handle multi-level trees.
 /// Fetches cells on-demand using page headers for efficient memory usage.
 pub struct LeafIterator<'t> {
-    /// Stack of pages to visit: (page_num, is_processed)
-    /// is_processed indicates if we've already yielded all children
-    pages_to_visit: Vec<(u32, bool)>,
+    /// Stack of pages to visit: (page_num, current_cell_index)
+    /// For leaf pages, current_cell_index tracks which cell to process next
+    /// For interior pages, pushed with current_cell_index=0 and processed once
+    pages_to_visit: Vec<(u32, u16)>,
     /// Reference to transaction for page access
     transaction: &'t Transaction,
-    /// Current page number being iterated
-    current_page_num: u32,
-    /// Current cell index within the current page
-    current_cell_index: u16,
-    /// Total cells in the current page
-    current_cell_count: u16,
 }
 
 impl<'t> LeafIterator<'t> {
     /// Create a new iterator starting from a root page
     fn new(root_page: u32, transaction: &'t Transaction) -> Self {
         Self {
-            pages_to_visit: vec![(root_page, false)],
+            pages_to_visit: vec![(root_page, 0)],  // Start at cell 0 (or interior page marker)
             transaction,
-            current_page_num: 0,
-            current_cell_index: 0,
-            current_cell_count: 0,
         }
     }
 
@@ -228,42 +220,26 @@ impl<'t> LeafIterator<'t> {
     /// 
     /// Returns the number of cells in the page so the iterator knows
     /// how many cells to process.
-    fn load_leaf_page_metadata(&mut self, page_num: u32) -> Result<()> {
+    fn get_cell_count(&self, page_num: u32) -> Result<u16> {
         let page_ref = self.transaction.page(page_num)?;
         let header = page_ref.header()?;
-        
-        self.current_page_num = page_num;
-        self.current_cell_index = 0;
-        self.current_cell_count = header.cell_count();
-        
-        Ok(())
+        Ok(header.cell_count())
     }
 
     /// Process an interior page to add its children to the stack
-    fn process_interior_page(&mut self, page_num: u32) -> Result<()> {
+    fn process_interior_page(&self, page_num: u32) -> Result<Vec<u32>> {
         let page_ref = self.transaction.page(page_num)?;
-        let page_type = page_ref.page_type()?;
 
-        match page_type {
-            PageType::TableInterior | PageType::IndexInterior => {
-                if let Some(interior_iter) = page_ref.as_interior_cells()? {
-                    // Collect all child page pointers in reverse order to visit in correct sequence
-                    let mut children = Vec::new();
-                    for cell_result in interior_iter {
-                        if let Ok(interior_cell) = cell_result {
-                            children.push(interior_cell.child_pointer());
-                        }
-                    }
-                    // Add children in reverse so they're popped in correct order
-                    for child_ptr in children.into_iter().rev() {
-                        self.pages_to_visit.push((child_ptr, false));
-                    }
+        if let Some(interior_iter) = page_ref.as_interior_cells()? {
+            let mut children = Vec::new();
+            for cell_result in interior_iter {
+                if let Ok(interior_cell) = cell_result {
+                    children.push(interior_cell.child_pointer());
                 }
-                Ok(())
             }
-            _ => Err(Error::ExecutionError(
-                "Expected interior page in process_interior_page".to_string(),
-            )),
+            Ok(children)
+        } else {
+            Ok(Vec::new())
         }
     }
 }
@@ -274,86 +250,81 @@ impl<'t> Iterator for LeafIterator<'t> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            // If we have cells in the current page, fetch the next one
-            if self.current_cell_index < self.current_cell_count {
-                let cell_index = self.current_cell_index;
-                self.current_cell_index += 1;
+            // Pop next page and cell index from stack
+            let (page_num, cell_index) = self.pages_to_visit.pop()?;
 
-                // Get page reference for zero-copy access
-                let page_ref = match self.transaction.page(self.current_page_num) {
-                    Ok(pref) => pref,
-                    Err(e) => {
-                        self.current_cell_index = self.current_cell_count;
-                        return Some(Err(e));
-                    }
-                };
+            // Get page to check its type and cell count
+            let page_ref = match self.transaction.page(page_num) {
+                Ok(pref) => pref,
+                Err(e) => return Some(Err(e)),
+            };
 
-                // Fetch cell bytes without copying (zero-copy)
-                let cell_bytes = match self.fetch_leaf_cell_bytes(&page_ref, cell_index) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        return Some(Err(e));
-                    }
-                };
+            let cell_count = match self.get_cell_count(page_num) {
+                Ok(count) => count,
+                Err(e) => return Some(Err(e)),
+            };
 
-                // Parse the leaf cell to extract the payload (zero-copy parsing)
-                // Cell format: varint(payload_len) + varint(rowid) + payload
-                if cell_bytes.is_empty() {
-                    return Some(Err(Error::ParseError("Empty leaf cell".into())));
-                }
+            match page_ref.page_type() {
+                Ok(PageType::TableLeaf) | Ok(PageType::IndexLeaf) => {
+                    // Leaf page: process cells in sequence
+                    if cell_index < cell_count {
+                        // More cells to process in this page
+                        // Fetch and process this cell
+                        let page_ref = match self.transaction.page(page_num) {
+                            Ok(pref) => pref,
+                            Err(e) => return Some(Err(e)),
+                        };
 
-                match read_varint(cell_bytes) {
-                    Ok((payload_len, mut offset)) => {
-                        match read_varint(&cell_bytes[offset..]) {
-                            Ok((_rowid, rowid_len)) => {
-                                offset += rowid_len;
-                                let payload_end = offset + payload_len as usize;
-                                if payload_end > cell_bytes.len() {
-                                    return Some(Err(Error::ParseError("Leaf cell payload out of bounds".into())));
+                        let cell_bytes = match self.fetch_leaf_cell_bytes(&page_ref, cell_index) {
+                            Ok(bytes) => bytes,
+                            Err(e) => return Some(Err(e)),
+                        };
+
+                        // Push this page back with next cell index
+                        self.pages_to_visit.push((page_num, cell_index + 1));
+
+                        // Parse the leaf cell to extract the payload
+                        // Cell format: varint(payload_len) + varint(rowid) + payload
+                        if cell_bytes.is_empty() {
+                            return Some(Err(Error::ParseError("Empty leaf cell".into())));
+                        }
+
+                        match read_varint(cell_bytes) {
+                            Ok((payload_len, mut offset)) => {
+                                match read_varint(&cell_bytes[offset..]) {
+                                    Ok((_rowid, rowid_len)) => {
+                                        offset += rowid_len;
+                                        let payload_end = offset + payload_len as usize;
+                                        if payload_end > cell_bytes.len() {
+                                            return Some(Err(Error::ParseError(
+                                                "Leaf cell payload out of bounds".into(),
+                                            )));
+                                        }
+                                        return Some(Ok(cell_bytes[offset..payload_end].to_vec()));
+                                    }
+                                    Err(e) => return Some(Err(e)),
                                 }
-                                // Return payload slice without copying (zero-copy)
-                                return Some(Ok(cell_bytes[offset..payload_end].to_vec()));
                             }
                             Err(e) => return Some(Err(e)),
                         }
                     }
-                    Err(e) => return Some(Err(e)),
+                    // else: all cells in this page processed, continue loop to pop next page
                 }
-            }
-
-            // No more cells in current page, move to next page
-            match self.pages_to_visit.pop() {
-                Some((page_num, false)) => {
-                    // First time visiting this page, need to check its type
-                    match self.transaction.page(page_num) {
-                        Ok(page_ref) => {
-                            match page_ref.page_type() {
-                                Ok(PageType::TableLeaf) | Ok(PageType::IndexLeaf) => {
-                                    // Load leaf page metadata and continue to yield cells
-                                    if let Err(e) = self.load_leaf_page_metadata(page_num) {
-                                        return Some(Err(e));
-                                    }
-                                }
-                                Ok(PageType::TableInterior) | Ok(PageType::IndexInterior) => {
-                                    // Process interior page to add children
-                                    if let Err(e) = self.process_interior_page(page_num) {
-                                        return Some(Err(e));
-                                    }
-                                }
-                                Err(e) => return Some(Err(e)),
+                Ok(PageType::TableInterior) | Ok(PageType::IndexInterior) => {
+                    // Interior page: collect children and push them
+                    match self.process_interior_page(page_num) {
+                        Ok(children) => {
+                            // Add children in reverse so they're popped in correct order
+                            for child_ptr in children.into_iter().rev() {
+                                self.pages_to_visit.push((child_ptr, 0));
                             }
                         }
                         Err(e) => return Some(Err(e)),
                     }
+                    // Don't push this interior page back - we're done with it
+                    // Continue loop to pop next page
                 }
-                Some((_page_num, true)) => {
-                    // Already processed, skip
-                    continue;
-                }
-                None => {
-                    // No more pages to visit
-                    return None;
-                }
+                Err(e) => return Some(Err(e)),
             }
         }
     }
