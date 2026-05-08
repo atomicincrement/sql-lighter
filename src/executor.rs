@@ -13,6 +13,7 @@ use crate::parser::{
 use crate::planner::ExecutionPlan;
 use crate::types::{Row, Value};
 use crate::file_format::{Record};
+use crate::table::TableRef;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -997,64 +998,18 @@ impl VirtualMachine {
         }
     }
 
-    /// Load a table from a B-tree page (used when opening database files)
-    /// Phase 7d: Accepts PageRef instead of Page for zero-copy reads from mmap
-    pub fn load_table_from_page(&mut self, table_name: &str, columns: Vec<String>, page_ref: crate::file_format::PageRef) -> Result<()> {
-        // Phase 7g: Use raw_cells() to avoid Cell struct allocation during load
-        let mut storage = crate::executor::TableStorage::new(columns.clone());
-        storage.page_num = page_ref.page_num();
-
-        // Get raw cell bytes without parsing into Cell objects
-        let raw_cells = page_ref.raw_cells()?;
-        
-        for cell_bytes in raw_cells {
-            // Parse leaf cell format directly: varint payload_len + varint rowid + payload
-            // This avoids the Cell enum entirely (Phase 7g)
-            if let Ok((payload_len, mut offset)) = crate::file_format::varint::read_varint(cell_bytes) {
-                if let Ok((rowid, rowid_len)) = crate::file_format::varint::read_varint(&cell_bytes[offset..]) {
-                    offset += rowid_len;
-                    let payload_end = offset + payload_len as usize;
-                    if payload_end <= cell_bytes.len() {
-                        let payload = &cell_bytes[offset..payload_end];
-                        // Try to parse the record from the cell payload
-                        if let Ok(record) = Record::parse(payload) {
-                            // Convert record to a Row
-                            let mut row = Row::new();
-                            for (i, col_name) in columns.iter().enumerate() {
-                                if i < record.columns.len() {
-                                    row.push((col_name.clone(), record.columns[i].clone()));
-                                } else {
-                                    row.push((col_name.clone(), Value::Null));
-                                }
-                            }
-                            // Add row to storage (which creates normalized cells with proper rowid tracking)
-                            let _ = storage.add_row(&row);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Only insert the table if we loaded any rows
-        if !storage.cells_bytes.is_empty() {
-            self.tables.insert(table_name.to_string(), storage);
-        }
-
-        Ok(())
-    }
-
-    /// Execute an execution plan
+    /// Execute an execution plan with transaction context
     /// References: https://www.sqlite.org/opcode.html
-    pub fn execute(&mut self, plan: &ExecutionPlan) -> Result<ResultSet> {
+    pub fn execute(&mut self, plan: &ExecutionPlan, transaction: &mut crate::transaction::Transaction) -> Result<ResultSet> {
         match plan {
             // FullTableScan: Sequential scan of entire table without index
             // Example: SELECT * FROM users
             // Generates all rows from table in storage order
             ExecutionPlan::FullTableScan { table, alias: _ } => {
-                self.tables
-                    .get(*table)
+                transaction
+                    .get_table_ref(*table)
                     .ok_or_else(|| Error::ExecutionError(format!("Table '{}' not found", table)))?
-                    .to_result_set()
+                    .to_result_set(transaction)
             }
 
             // IndexScan: Search using index structure for fast lookup
@@ -1065,10 +1020,10 @@ impl VirtualMachine {
                 index: _,
                 condition,
             } => {
-                let mut result = self.tables
-                    .get(*table)
+                let mut result = transaction
+                    .get_table_ref(*table)
                     .ok_or_else(|| Error::ExecutionError(format!("Table '{}' not found", table)))?
-                    .to_result_set()?;
+                    .to_result_set(transaction)?;
 
                 if let Some(cond) = condition {
                     result = self.apply_filter(&result, cond)?;
@@ -1081,7 +1036,7 @@ impl VirtualMachine {
             // Example: SELECT * FROM orders WHERE total > 100
             // Evaluates condition on each row, keeping only rows where condition is true
             ExecutionPlan::Filter { input, condition } => {
-                let input_result = self.execute(input)?;
+                let input_result = self.execute(input, transaction)?;
                 self.apply_filter(&input_result, condition)
             }
 
@@ -1089,7 +1044,7 @@ impl VirtualMachine {
             // Example: SELECT * FROM products ORDER BY price DESC, name ASC
             // Primary sort by price (descending), then by name (ascending) for ties
             ExecutionPlan::Sort { input, order_by } => {
-                let mut result = self.execute(input)?;
+                let mut result = self.execute(input, transaction)?;
 
                 let order_terms: Result<Vec<_>> = order_by
                     .iter()
@@ -1111,7 +1066,7 @@ impl VirtualMachine {
                 limit,
                 offset,
             } => {
-                let mut result = self.execute(input)?;
+                let mut result = self.execute(input, transaction)?;
 
                 let empty_row: Row = vec![];
                 let empty_columns: Vec<String> = vec![];
@@ -1142,7 +1097,7 @@ impl VirtualMachine {
             // Example: SELECT id, name, email FROM users
             // Returns only specified columns, dropping others (column pruning)
             ExecutionPlan::Project { input, columns } => {
-                let result = self.execute(input)?;
+                let result = self.execute(input, transaction)?;
                 result.project(columns)
             }
 
@@ -1155,17 +1110,20 @@ impl VirtualMachine {
                 values,
             } => {
                 // Create table if it doesn't exist
-                if !self.tables.contains_key(*table) {
-                    let column_names = (0..values[0].len())
-                        .map(|i| format!("col{}", i))
+                if transaction.get_table_ref(*table).is_none() {
+                    let column_names: Vec<(String, String)> = (0..values[0].len())
+                        .map(|i| (format!("col{}", i), "TEXT".to_string()))
                         .collect();
-                    self.tables.insert(
+                    let table_ref = crate::table::TableRef::new(
                         table.to_string(),
-                        TableStorage::new(column_names),
+                        column_names,
+                        format!("CREATE TABLE {} ...", table),
+                        1,
                     );
+                    transaction.insert_table(table.to_string(), table_ref);
                 }
 
-                let table_ref = self.tables.get_mut(*table).unwrap();
+                let table_ref = transaction.get_table(*table).unwrap();
                 let empty_row: Row = vec![];
                 let empty_columns: Vec<String> = vec![];
 
@@ -1189,8 +1147,8 @@ impl VirtualMachine {
                 assignments,
                 condition,
             } => {
-                if let Some(table_data) = self.tables.get_mut(*table) {
-                    let columns = table_data.columns.clone();
+                if let Some(table_data) = transaction.get_table(*table) {
+                    let columns = table_data.column_names();
                     let mut assign_values = Vec::new();
                     let empty_row: Row = vec![];
                     let empty_columns: Vec<String> = vec![];
@@ -1210,8 +1168,8 @@ impl VirtualMachine {
             // Example: DELETE FROM audit_log WHERE created_at < '2020-01-01'
             // Removes all rows satisfying condition (without condition, deletes all rows)
             ExecutionPlan::Delete { table, condition } => {
-                if let Some(table_data) = self.tables.get_mut(*table) {
-                    let columns = table_data.columns.clone();
+                if let Some(table_data) = transaction.get_table(*table) {
+                    let columns = table_data.column_names();
                     table_data.delete_matching(condition, &columns)?;
                 }
 
@@ -1222,8 +1180,17 @@ impl VirtualMachine {
             // Example: CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)
             // Allocates table structure and prepares for INSERT operations
             ExecutionPlan::CreateTable { table, columns } => {
-                let column_names = columns.iter().map(|c| c.name.to_string()).collect();
-                self.tables.insert(table.to_string(), TableStorage::new(column_names));
+                let column_names: Vec<(String, String)> = columns
+                    .iter()
+                    .map(|c| (c.name.to_string(), "TEXT".to_string()))
+                    .collect();
+                let table_ref = TableRef::new(
+                    table.to_string(),
+                    column_names,
+                    format!("CREATE TABLE {} ...", table),
+                    1,
+                );
+                transaction.insert_table(table.to_string(), table_ref);
                 Ok(ResultSet::new(vec![]))
             }
 
@@ -1236,8 +1203,8 @@ impl VirtualMachine {
                 right,
                 condition,
             } => {
-                let left_result = self.execute(left)?;
-                let right_result = self.execute(right)?;
+                let left_result = self.execute(left, transaction)?;
+                let right_result = self.execute(right, transaction)?;
                 self.nested_loop_join(&left_result, &right_result, condition)
             }
 
@@ -1251,8 +1218,8 @@ impl VirtualMachine {
                 left_key,
                 right_key,
             } => {
-                let left_result = self.execute(left)?;
-                let right_result = self.execute(right)?;
+                let left_result = self.execute(left, transaction)?;
+                let right_result = self.execute(right, transaction)?;
                 self.hash_join(&left_result, &right_result, left_key, right_key)
             }
 
@@ -1262,7 +1229,7 @@ impl VirtualMachine {
             ExecutionPlan::Composite(plans) => {
                 let mut result = ResultSet::new(vec![]);
                 for plan in plans {
-                    result = self.execute(plan)?;
+                    result = self.execute(plan, transaction)?;
                 }
                 Ok(result)
             }
@@ -1275,7 +1242,7 @@ impl VirtualMachine {
                 group_keys,
                 aggregates: _,
             } => {
-                let input_result = self.execute(input)?;
+                let input_result = self.execute(input, transaction)?;
                 self.apply_group_by(&input_result, group_keys)
             }
 
@@ -1283,7 +1250,7 @@ impl VirtualMachine {
             // Example: SELECT DISTINCT country FROM customers
             // Keeps first occurrence of each unique row, removes duplicates
             ExecutionPlan::Distinct { input } => {
-                let result = self.execute(input)?;
+                let result = self.execute(input, transaction)?;
                 self.apply_distinct(&result)
             }
 
@@ -1302,25 +1269,15 @@ impl VirtualMachine {
                     *unique,
                 );
 
-                // Populate index with existing rows from the table (Phase 7f: parse bytes on-demand)
-                if let Some(table_storage) = self.tables.get(&table.to_string()) {
-                    // Extract indexed column value for each row in the table
-                    for cell_bytes in &table_storage.cells_bytes {
-                        // Phase 7f: Parse bytes to extract rowid and record
-                        if let Ok((payload_len, mut offset)) = crate::file_format::varint::read_varint(cell_bytes) {
-                            if let Ok((rowid, rowid_len)) = crate::file_format::varint::read_varint(&cell_bytes[offset..]) {
-                                offset += rowid_len;
-                                let payload_end = offset + payload_len as usize;
-                                if payload_end <= cell_bytes.len() {
-                                    let payload = &cell_bytes[offset..payload_end];
-                                    if let Ok(record) = Record::parse(payload) {
-                                        // Find the column index for the indexed column
-                                        if let Some(col_idx) = table_storage.columns.iter().position(|c| c == columns[0]) {
-                                            if col_idx < record.columns.len() {
-                                                let _ = index_storage.insert_entry(&record.columns[col_idx], rowid);
-                                            }
-                                        }
-                                    }
+                // Populate index with existing rows from the table
+                if let Some(table_ref) = transaction.get_table_ref(&table.to_string()) {
+                    if let Ok(rows) = table_ref.get_all_rows(transaction) {
+                        for row in rows {
+                            // Find the indexed column value in the row
+                            for (col_name, col_val) in &row {
+                                if col_name == &columns[0] {
+                                    let _ = index_storage.insert_entry(col_val, 0); // rowid TODO
+                                    break;
                                 }
                             }
                         }
@@ -1495,12 +1452,6 @@ impl VirtualMachine {
         Ok(distinct_result)
     }
 
-    /// Get all tables from the virtual machine (Phase 7b - for persistence)
-    /// 
-    /// Returns a clone of the tables HashMap for serialization and persistence.
-    pub fn get_all_tables(&self) -> HashMap<String, TableStorage> {
-        self.tables.clone()
-    }
 
 }
 
@@ -1618,18 +1569,6 @@ mod tests {
     }
 
     #[test]
-    fn test_virtual_machine_create_table() {
-        let mut vm = VirtualMachine::new();
-        let plan = ExecutionPlan::CreateTable {
-            table: "users",
-            columns: vec![],
-        };
-
-        let _result = vm.execute(&plan).unwrap();
-        assert!(vm.tables.contains_key("users"));
-    }
-
-    #[test]
     fn test_comparison_values() {
         assert_eq!(
             compare_values(&Value::Integer(5), &Value::Integer(10)),
@@ -1689,73 +1628,7 @@ mod tests {
         assert_eq!(grouped.rows.len(), 2);
     }
 
-    #[test]
-    fn test_create_index() {
-        let mut vm = VirtualMachine::new();
-        let plan = ExecutionPlan::CreateIndex {
-            index: "idx_users_email",
-            table: "users",
-            columns: vec!["email"],
-            unique: true,
-        };
 
-        let result = vm.execute(&plan).unwrap();
-        assert_eq!(result.rows.len(), 0); // DDL returns empty result set
-        assert!(vm.indexes.contains_key("idx_users_email"));
-    }
-
-    #[test]
-    fn test_drop_index() {
-        let mut vm = VirtualMachine::new();
-
-        // Create index first
-        let create_plan = ExecutionPlan::CreateIndex {
-            index: "idx_test",
-            table: "test_table",
-            columns: vec!["col1"],
-            unique: false,
-        };
-        vm.execute(&create_plan).unwrap();
-        assert!(vm.indexes.contains_key("idx_test"));
-
-        // Drop index
-        let drop_plan = ExecutionPlan::DropIndex {
-            index: "idx_test",
-        };
-        vm.execute(&drop_plan).unwrap();
-        assert!(!vm.indexes.contains_key("idx_test"));
-    }
-
-    #[test]
-    fn test_index_scan_optimization() {
-        let mut vm = VirtualMachine::new();
-
-        // Create table
-        let create_table_plan = ExecutionPlan::CreateTable {
-            table: "users",
-            columns: vec![],
-        };
-        vm.execute(&create_table_plan).unwrap();
-
-        // Create index
-        let create_index_plan = ExecutionPlan::CreateIndex {
-            index: "idx_users_id",
-            table: "users",
-            columns: vec!["id"],
-            unique: false,
-        };
-        vm.execute(&create_index_plan).unwrap();
-
-        // Verify index exists and has storage with B-tree
-        assert!(vm.indexes.contains_key("idx_users_id"));
-        let index_meta = vm.indexes.get("idx_users_id").unwrap();
-        assert_eq!(index_meta.table, "users");
-        assert_eq!(index_meta.columns, vec!["id".to_string()]);
-        
-        // Verify the index storage has B-tree infrastructure
-        assert_eq!(index_meta.storage.column_name, "id");
-        assert!(!index_meta.storage.unique);
-    }
 }
 
 

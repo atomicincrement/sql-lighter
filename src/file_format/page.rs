@@ -1,7 +1,7 @@
 //! B-tree page handling
 
 use crate::error::{Error, Result};
-use super::cell::{Cell, LeafCellIter, InteriorCellIter};
+use super::cell::{LeafCellIter, InteriorCellIter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageType {
@@ -95,39 +95,9 @@ impl<'a> PageRef<'a> {
         self.header()?.page_type()
     }
 
-    /// Parse all cells from this page
-    pub fn cells(&self) -> Result<Vec<Cell>> {
-        let header = self.header()?;
-        let header_size = header.header_size()?;
-
-        // Cell pointers come after the header
-        // Note: buffer doesn't include file header even for page 1, so always use header_size
-        let cell_pointer_start = header_size;
-        let cell_count = header.cell_count();
-
-        let mut cells = Vec::new();
-
-        // Read cell pointers and cells
-        for i in 0..cell_count as usize {
-            let ptr_offset = cell_pointer_start + (i * 2);
-            if ptr_offset + 2 > self.buffer.len() {
-                return Err(Error::ParseError("Cell pointer out of bounds".into()));
-            }
-
-            let cell_offset = u16::from_be_bytes([
-                self.buffer[ptr_offset],
-                self.buffer[ptr_offset + 1],
-            ]) as usize;
-
-            if cell_offset >= self.buffer.len() {
-                return Err(Error::ParseError("Cell offset out of bounds".into()));
-            }
-
-            let cell = Cell::parse(&self.buffer[cell_offset..], &header)?;
-            cells.push(cell);
-        }
-
-        Ok(cells)
+    /// Parse all cells from this page (deprecated - use raw_cells() instead)
+    pub fn cells(&self) -> Result<Vec<()>> {
+        todo!("Use raw_cells() or as_leaf_cells()/as_interior_cells() iterators for zero-copy access")
     }
 
     /// Phase 7g: Get raw cell byte slices without parsing into Cell objects
@@ -266,9 +236,9 @@ impl<'a> PageMut<'a> {
         }
     }
 
-    /// Parse all cells from this page
-    pub fn cells(&self) -> Result<Vec<Cell>> {
-        self.as_ref().cells()
+    /// Parse all cells from this page (deprecated - use raw_cells() instead)
+    pub fn cells(&self) -> Result<Vec<()>> {
+        todo!("Use raw_cells() or as_leaf_cells()/as_interior_cells() iterators for zero-copy access")
     }
 
     /// Get an iterator over leaf cells in this page (zero-copy)
@@ -373,21 +343,9 @@ impl<'a> PageMut<'a> {
         Ok(())
     }
 
-    /// Phase 7e compatibility: Write Cell objects (serializes then writes)
-    pub fn write_cells(&mut self, page_type: PageType, cells: &[Cell]) -> Result<()> {
-        // Serialize all cells first
-        let serialized_cells: Vec<Vec<u8>> = cells
-            .iter()
-            .map(|cell| cell.serialize())
-            .collect::<Result<Vec<_>>>()?;
-        
-        // Convert to byte slices
-        let byte_slices: Vec<&[u8]> = serialized_cells
-            .iter()
-            .map(|b| b.as_slice())
-            .collect();
-        
-        self.write_cells_bytes(page_type, &byte_slices)
+    /// Phase 7e compatibility: Write Cell objects (deprecated - use write_cells_bytes() instead)
+    pub fn write_cells(&mut self, page_type: PageType, _cells: &[()]) -> Result<()> {
+        todo!("Use write_cells_bytes() with pre-serialized cell bytes instead")
     }
 }
 
@@ -507,102 +465,7 @@ impl<'a> PageHeaderMut<'a> {
     }
 }
 
-/// Owned B-tree page with mutable cells for in-memory operations
-#[derive(Debug, Clone)]
-pub struct Page {
-    pub page_num: u32,
-    pub page_type: PageType,
-    pub cells: Vec<Cell>,
-}
-
-impl Page {
-    /// Create a new page
-    pub fn new(page_num: u32, page_type: PageType) -> Self {
-        Self {
-            page_num,
-            page_type,
-            cells: Vec::new(),
-        }
-    }
-
-    /// Parse a page from a buffer (deprecated - use PageRef instead)
-    /// 
-    /// Phase 7g: For zero-copy access without Cell allocations, use PageRef directly.
-    /// This method is kept for backward compatibility but should be phased out.
-    pub fn parse(buffer: &[u8], page_num: u32) -> Result<Self> {
-        let page_ref = PageRef::new(buffer, page_num)?;
-        let page_type = page_ref.page_type()?;
-        let cells = page_ref.cells()?;
-        Ok(Self {
-            page_num,
-            page_type,
-            cells,
-        })
-    }
-
-    /// Serialize page into a buffer of given size
-    pub fn serialize(&self, page_size: usize) -> Result<Vec<u8>> {
-        let mut buffer = vec![0u8; page_size];
-
-        // For first page, file header takes first 100 bytes
-        let header_start = if self.page_num == 1 { 100 } else { 0 };
-
-        // Initialize page header at the appropriate offset
-        let mut header_mut = PageHeaderMut::new(&mut buffer[header_start..header_start + 12])?;
-        header_mut.init(self.page_type);
-        header_mut.set_cell_count(self.cells.len() as u16);
-
-        // Calculate cell pointer array start
-        let header_size = if self.page_type.is_interior() { 12 } else { 8 };
-        let cell_ptr_start = header_start + header_size;
-
-        // Write cells (from the end of the page, working backwards)
-        let mut current_cell_offset = page_size;
-
-        for (i, cell) in self.cells.iter().enumerate() {
-            let cell_data = cell.serialize()?;
-            current_cell_offset -= cell_data.len();
-
-            buffer[current_cell_offset..current_cell_offset + cell_data.len()]
-                .copy_from_slice(&cell_data);
-
-            // Write cell pointer
-            let ptr_offset = cell_ptr_start + (i * 2);
-            buffer[ptr_offset..ptr_offset + 2]
-                .copy_from_slice(&(current_cell_offset as u16).to_be_bytes());
-        }
-
-        // Update cell_start field in header
-        let mut header_mut = PageHeaderMut::new(&mut buffer[header_start..header_start + 12])?;
-        header_mut.set_cell_start(cell_ptr_start as u16);
-
-        Ok(buffer)
-    }
-
-    /// Add a cell to this page
-    pub fn add_cell(&mut self, cell: Cell) {
-        self.cells.push(cell);
-    }
-
-    /// Remove a cell by index
-    pub fn remove_cell(&mut self, index: usize) -> Option<Cell> {
-        if index < self.cells.len() {
-            Some(self.cells.remove(index))
-        } else {
-            None
-        }
-    }
-
-    /// Check if page is a leaf
-    pub fn is_leaf(&self) -> bool {
-        self.page_type.is_leaf()
-    }
-
-    /// Check if page is interior
-    pub fn is_interior(&self) -> bool {
-        self.page_type.is_interior()
-    }
-}
+/// Page struct removed - use PageRef/PageMut for zero-copy access instead
 
 #[cfg(test)]
 mod tests {

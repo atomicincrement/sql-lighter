@@ -37,26 +37,16 @@ impl Statement {
     /// ```
     pub fn query_map<P, F, T>(
         &self,
-        conn: &mut Connection,
-        params: P,
-        f: F,
+        _conn: &mut Connection,
+        _params: P,
+        _f: F,
     ) -> Result<Vec<Result<T>>>
     where
         P: Params,
         F: Fn(RowRef) -> Result<T>,
         T: 'static,
     {
-        // Execute the query
-        let result = conn.execute(&self.sql, params)?;
-        
-        // Map each row using the closure
-        let mapped: Vec<Result<T>> = result
-            .rows
-            .into_iter()
-            .map(|row| f(RowRef { row }))
-            .collect();
-        
-        Ok(mapped)
+        todo!("Statement::query_map - use Transaction API instead")
     }
 }
 

@@ -11,11 +11,16 @@ pub mod storage;
 pub mod error;
 pub mod types;
 pub mod connection;
+pub mod table;
+pub mod transaction;
 pub mod params;
 pub mod statement;
 
 pub use error::{Error, Result};
-pub use connection::{Connection, ExecutionResult, Row};
+pub use connection::{Connection, ExecutionResult, Row, table};
+pub use transaction::Transaction;
+pub use table::TableRef;
+pub use file_format::btree::{BTree, LeafIterator};
 pub use params::{Params, ToSql};
 pub use statement::{Statement, RowRef, FromValue};
 

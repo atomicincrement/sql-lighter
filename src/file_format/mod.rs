@@ -11,11 +11,10 @@ pub mod record;
 pub mod varint;
 
 pub use header::{FileHeaderRef, FileHeaderMut, TextEncoding, HEADER_SIZE};
-pub use page::{Page, PageHeaderRef, PageHeaderMut, PageType, PageRef, PageMut};
-pub use btree::BTree;
-// Phase 7j: Cell, LeafCellRef, InteriorCellRef kept for deprecated read_page() method
-// New code should use PageRef/PageMut directly for zero-copy access
-pub use cell::{Cell, LeafCellRef, InteriorCellRef, LeafCellIter, InteriorCellIter};
+pub use page::{PageHeaderRef, PageHeaderMut, PageType, PageRef, PageMut};
+// BTree struct removed - use BTree2 from connection.rs instead
+// Cell and Page structs removed - use PageRef/PageMut and iterators for zero-copy access
+pub use cell::{LeafCellRef, InteriorCellRef, LeafCellIter, InteriorCellIter};
 pub use record::Record;
 pub use varint::{read_varint, write_varint};
 
@@ -84,29 +83,6 @@ impl DatabaseFile {
             _file: file,
             mmap,
         })
-    }
-
-    /// Read a page from the database (Phase 7c: Direct mmap read, no cache)
-    pub fn read_page(&mut self, page_num: u32) -> Result<Page> {
-
-        let header_ref = FileHeaderRef::new(&self.mmap[0..HEADER_SIZE])?;
-        let page_size = header_ref.page_size() as usize;
-
-        // For page 1, include the file header (bytes 0-100) followed by page data (100-4096)
-        // For other pages, they start at their calculated offset
-        let (page_offset, page_end) = if page_num == 1 {
-            (0, page_size)
-        } else {
-            let offset = (page_num as usize - 1) * page_size;
-            (offset, offset + page_size)
-        };
-
-        if page_end > self.mmap.len() {
-            return Err(Error::ParseError("Page offset out of bounds".into()));
-        }
-
-        let page_data = &self.mmap[page_offset..page_end];
-        Page::parse(page_data, page_num)
     }
 
     /// Phase 7d: Read a page as a zero-copy PageRef from the mmap
@@ -237,16 +213,15 @@ mod tests {
         {
             let mut db = DatabaseFile::create(path, 4096)?;
             let mut page_mut = db.get_page_mut(1)?;
-            page_mut.write_cells(PageType::TableLeaf, &[])?;
+            page_mut.write_cells_bytes(PageType::TableLeaf, &[])?;
             db.flush()?;
         }
 
         // Read with second connection - should see the written data immediately
         {
-            let mut db = DatabaseFile::open(path)?;
-            let read_page = db.read_page(1)?;
-            assert_eq!(read_page.page_num, 1);
-            assert_eq!(read_page.page_type, PageType::TableLeaf);
+            let db = DatabaseFile::open(path)?;
+            let page_ref = db.read_page_ref(1)?;
+            assert_eq!(page_ref.page_type()?, PageType::TableLeaf);
         }
 
         Ok(())
@@ -262,28 +237,29 @@ mod tests {
         {
             let mut db = DatabaseFile::create(path, 4096)?;
             let mut page_mut = db.get_page_mut(1)?;
-            page_mut.write_cells(PageType::TableLeaf, &[])?;
+            page_mut.write_cells_bytes(PageType::TableLeaf, &[])?;
             db.flush()?;
         }
 
         // Connection 1: Read and modify
         {
-            let mut db1 = DatabaseFile::open(path)?;
-            let page = db1.read_page(1)?;
+            let db1 = DatabaseFile::open(path)?;
+            let page_ref = db1.read_page_ref(1)?;
             // Verify we can read what was written
-            assert_eq!(page.page_type, PageType::TableLeaf);
+            assert_eq!(page_ref.page_type()?, PageType::TableLeaf);
             
             // Modify via direct mmap write (Phase 7h: page 1 header preserved)
-            let mut page_mut = db1.get_page_mut(1)?;
-            page_mut.write_cells(PageType::TableInterior, &[])?;
-            db1.flush()?;
+            let mut db1_mut = DatabaseFile::open(path)?;
+            let mut page_mut = db1_mut.get_page_mut(1)?;
+            page_mut.write_cells_bytes(PageType::TableInterior, &[])?;
+            db1_mut.flush()?;
         }
 
         // Connection 2: Read the same data
         {
-            let mut db2 = DatabaseFile::open(path)?;
-            let page = db2.read_page(1)?;
-            assert_eq!(page.page_type, PageType::TableInterior);
+            let db2 = DatabaseFile::open(path)?;
+            let page_ref = db2.read_page_ref(1)?;
+            assert_eq!(page_ref.page_type()?, PageType::TableInterior);
         }
 
         Ok(())
@@ -299,15 +275,15 @@ mod tests {
         {
             let mut db = DatabaseFile::create(path, 4096)?;
             let mut page_mut = db.get_page_mut(1)?;
-            page_mut.write_cells(PageType::TableLeaf, &[])?;
+            page_mut.write_cells_bytes(PageType::TableLeaf, &[])?;
             db.flush()?;  // This should call fsync via mmap.flush()
         }
 
         // Verify data persists after process boundary (simulated by drop)
         {
-            let mut db = DatabaseFile::open(path)?;
-            let page = db.read_page(1)?;
-            assert_eq!(page.page_type, PageType::TableLeaf);
+            let db = DatabaseFile::open(path)?;
+            let page_ref = db.read_page_ref(1)?;
+            assert_eq!(page_ref.page_type()?, PageType::TableLeaf);
         }
 
         Ok(())
@@ -323,7 +299,7 @@ mod tests {
         {
             let mut db = DatabaseFile::create(path, 4096)?;
             let mut page_mut = db.get_page_mut(1)?;
-            page_mut.write_cells(PageType::TableLeaf, &[])?;
+            page_mut.write_cells_bytes(PageType::TableLeaf, &[])?;
             db.flush()?;
         }
         
@@ -346,19 +322,19 @@ mod tests {
             // Write to page 1 (table leaf)
             {
                 let mut page_mut = db.get_page_mut(1)?;
-                page_mut.write_cells(PageType::TableLeaf, &[])?;
+                page_mut.write_cells_bytes(PageType::TableLeaf, &[])?
             }
             
             // Write to page 2 (table interior)
             {
                 let mut page_mut = db.get_page_mut(2)?;
-                page_mut.write_cells(PageType::TableInterior, &[])?;
+                page_mut.write_cells_bytes(PageType::TableInterior, &[])?
             }
             
             // Write to page 3 (table leaf again)
             {
                 let mut page_mut = db.get_page_mut(3)?;
-                page_mut.write_cells(PageType::TableLeaf, &[])?;
+                page_mut.write_cells_bytes(PageType::TableLeaf, &[])?;
             }
             
             db.flush()?;
@@ -366,14 +342,14 @@ mod tests {
         
         // Verify all pages were written correctly
         {
-            let mut db = DatabaseFile::open(path)?;
-            let page1 = db.read_page(1)?;
-            let page2 = db.read_page(2)?;
-            let page3 = db.read_page(3)?;
+            let db = DatabaseFile::open(path)?;
+            let page1_ref = db.read_page_ref(1)?;
+            let page2_ref = db.read_page_ref(2)?;
+            let page3_ref = db.read_page_ref(3)?;
             
-            assert_eq!(page1.page_type, PageType::TableLeaf);
-            assert_eq!(page2.page_type, PageType::TableInterior);
-            assert_eq!(page3.page_type, PageType::TableLeaf);
+            assert_eq!(page1_ref.page_type()?, PageType::TableLeaf);
+            assert_eq!(page2_ref.page_type()?, PageType::TableInterior);
+            assert_eq!(page3_ref.page_type()?, PageType::TableLeaf);
         }
         
         Ok(())

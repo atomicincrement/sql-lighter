@@ -25,12 +25,9 @@ impl Record {
             return Err(Error::ParseError("Record header out of bounds".into()));
         }
 
-        eprintln!("len={header_len} offset={offset}");
-
         // Read type codes from header
         let mut type_codes = Vec::new();
         while offset < header_len {
-            eprintln!("  read_varint offset={offset} {:02x}", buffer[offset]);
             let (type_code, len) = read_varint(&buffer[offset..])?;
             type_codes.push(type_code as u32);
             offset += len;
@@ -39,9 +36,6 @@ impl Record {
         // Parse column values
         let mut columns = Vec::new();
         for type_code in type_codes {
-            if offset < buffer.len() {
-                eprintln!("  parse_value offset={offset} {:02x}", buffer[offset]);
-            }
             let mut relative_offset = 0usize;
             let value = Self::parse_value(type_code, &buffer[offset..], &mut relative_offset)?;
             offset += relative_offset;
