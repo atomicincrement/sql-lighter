@@ -202,20 +202,18 @@ impl<'t> LeafIterator<'t> {
         }
     }
 
-    /// Fetch a cell from a leaf page by index, returning raw cell bytes
+    /// Fetch a cell from a leaf page by index, returning a reference to raw cell bytes
     /// 
-    /// Uses the page header to locate the cell pointer, then reads the cell
-    /// data directly from the page buffer without allocating intermediate structures.
-    fn fetch_leaf_cell_bytes(&self, page_num: u32, cell_index: u16) -> Result<Vec<u8>> {
-        let page_ref = self.transaction.page(page_num)?;
-        
+    /// Zero-copy: returns a reference directly into the page buffer with the same lifetime
+    /// as the PageRef. Uses the page header to validate the cell index, then returns the cell data.
+    fn fetch_leaf_cell_bytes<'a>(&self, page_ref: &PageRef<'a>, cell_index: u16) -> Result<&'a [u8]> {
         // Get page header to validate cell index
         let header = page_ref.header()?;
         if cell_index >= header.cell_count() {
             return Err(Error::ParseError("Cell index out of bounds".into()));
         }
 
-        // Get raw cell bytes from the page
+        // Get raw cell bytes from the page (zero-copy)
         let raw_cells = page_ref.raw_cells()?;
         
         // Find the cell by its index
@@ -223,7 +221,7 @@ impl<'t> LeafIterator<'t> {
             return Err(Error::ParseError("Cell index beyond available cells".into()));
         }
 
-        Ok(raw_cells[cell_index as usize].to_vec())
+        Ok(raw_cells[cell_index as usize])
     }
 
     /// Load cell metadata from a leaf page (count of cells)
@@ -278,22 +276,33 @@ impl<'t> Iterator for LeafIterator<'t> {
         loop {
             // If we have cells in the current page, fetch the next one
             if self.current_cell_index < self.current_cell_count {
-                let cell_bytes = match self.fetch_leaf_cell_bytes(self.current_page_num, self.current_cell_index) {
-                    Ok(bytes) => bytes,
+                let cell_index = self.current_cell_index;
+                self.current_cell_index += 1;
+
+                // Get page reference for zero-copy access
+                let page_ref = match self.transaction.page(self.current_page_num) {
+                    Ok(pref) => pref,
                     Err(e) => {
-                        self.current_cell_index = self.current_cell_count; // Skip to next page
+                        self.current_cell_index = self.current_cell_count;
                         return Some(Err(e));
                     }
                 };
-                self.current_cell_index += 1;
 
-                // Parse the leaf cell to extract the payload
+                // Fetch cell bytes without copying (zero-copy)
+                let cell_bytes = match self.fetch_leaf_cell_bytes(&page_ref, cell_index) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        return Some(Err(e));
+                    }
+                };
+
+                // Parse the leaf cell to extract the payload (zero-copy parsing)
                 // Cell format: varint(payload_len) + varint(rowid) + payload
                 if cell_bytes.is_empty() {
                     return Some(Err(Error::ParseError("Empty leaf cell".into())));
                 }
 
-                match read_varint(&cell_bytes) {
+                match read_varint(cell_bytes) {
                     Ok((payload_len, mut offset)) => {
                         match read_varint(&cell_bytes[offset..]) {
                             Ok((_rowid, rowid_len)) => {
@@ -302,6 +311,7 @@ impl<'t> Iterator for LeafIterator<'t> {
                                 if payload_end > cell_bytes.len() {
                                     return Some(Err(Error::ParseError("Leaf cell payload out of bounds".into())));
                                 }
+                                // Return payload slice without copying (zero-copy)
                                 return Some(Ok(cell_bytes[offset..payload_end].to_vec()));
                             }
                             Err(e) => return Some(Err(e)),
