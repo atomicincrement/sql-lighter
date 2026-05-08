@@ -100,8 +100,10 @@ impl<'a> PageRef<'a> {
         todo!("Use raw_cells() or as_leaf_cells()/as_interior_cells() iterators for zero-copy access")
     }
 
-    /// Phase 7g: Get raw cell byte slices without parsing into Cell objects
+    /// Phase 7g: Get raw cell byte slices without parsing into Cell objects (deprecated)
+    /// DEPRECATED: Prefer as_leaf_cells() or as_interior_cells() iterators for zero-copy access
     /// Returns Vec of byte slices, one for each cell in the page
+    #[deprecated(since = "0.1.0", note = "use as_leaf_cells() or as_interior_cells() instead")]
     pub fn raw_cells(&self) -> Result<Vec<&'a [u8]>> {
         let header = self.header()?;
         let header_size = header.header_size()?;
@@ -236,9 +238,9 @@ impl<'a> PageMut<'a> {
         }
     }
 
-    /// Parse all cells from this page (deprecated - use raw_cells() instead)
+    /// Parse all cells from this page (deprecated - use as_leaf_cells()/as_interior_cells() instead)
     pub fn cells(&self) -> Result<Vec<()>> {
-        todo!("Use raw_cells() or as_leaf_cells()/as_interior_cells() iterators for zero-copy access")
+        todo!("Use as_leaf_cells()/as_interior_cells() iterators for zero-copy access")
     }
 
     /// Get an iterator over leaf cells in this page (zero-copy)

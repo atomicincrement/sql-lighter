@@ -118,15 +118,16 @@ impl<'t> BTree<'t> {
 
             match page_type {
                 PageType::TableLeaf | PageType::IndexLeaf => {
-                    // Reached a leaf page - check if rowid exists
-                    let raw_cells = page_ref.raw_cells()?;
-                    for cell_bytes in raw_cells {
-                        // Parse leaf cell: varint(payload_len) + varint(rowid) + payload
-                        if let Ok((_, mut offset)) = read_varint(cell_bytes) {
-                            if let Ok((rowid, _)) = read_varint(&cell_bytes[offset..]) {
-                                if rowid == target_rowid {
-                                    rowid_found = true;
-                                    break;
+                    // Reached a leaf page - check if rowid exists using iterator
+                    if let Some(leaf_iter) = page_ref.as_leaf_cells()? {
+                        for cell_result in leaf_iter {
+                            if let Ok(cell_ref) = cell_result {
+                                // Use structured access via LeafCellRef::rowid()
+                                if let Ok(rowid) = cell_ref.rowid() {
+                                    if rowid == target_rowid {
+                                        rowid_found = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -204,12 +205,20 @@ impl<'t> LeafIterator<'t> {
 
         match page_type {
             PageType::TableLeaf | PageType::IndexLeaf => {
-                // Get raw cell bytes from leaf page (returns Vec<&[u8]>)
-                let raw_cells = page_ref.raw_cells()?;
-                // Convert to owned Vec<Vec<u8>>
-                self.current_cells = raw_cells.into_iter().map(|b| b.to_vec()).collect();
-                self.current_cell_index = 0;
-                Ok(())
+                // Get leaf cells iterator for zero-copy access
+                if let Some(leaf_iter) = page_ref.as_leaf_cells()? {
+                    // Convert to owned Vec<Vec<u8>> using iterator and as_bytes()
+                    self.current_cells = leaf_iter
+                        .filter_map(|result| result.ok())
+                        .map(|cell_ref| cell_ref.as_bytes().to_vec())
+                        .collect();
+                    self.current_cell_index = 0;
+                    Ok(())
+                } else {
+                    Err(Error::ExecutionError(
+                        "as_leaf_cells() returned None for leaf page".to_string(),
+                    ))
+                }
             }
             _ => Err(Error::ExecutionError(
                 "Expected leaf page in LeafIterator".to_string(),

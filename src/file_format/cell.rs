@@ -50,6 +50,11 @@ impl<'a> LeafCellRef<'a> {
 
         Ok(&self.buffer[offset..payload_end])
     }
+
+    /// Get the raw cell buffer (includes header varints)
+    pub fn as_bytes(&self) -> &'a [u8] {
+        self.buffer
+    }
 }
 
 impl<'a> fmt::Display for LeafCellRef<'a> {
@@ -145,6 +150,11 @@ impl<'a> InteriorCellRef<'a> {
     pub fn key(&self) -> Result<u64> {
         let (key, _) = read_varint(&self.buffer[4..])?;
         Ok(key)
+    }
+
+    /// Get the raw cell buffer (includes child pointer and key varints)
+    pub fn as_bytes(&self) -> &'a [u8] {
+        self.buffer
     }
 }
 
