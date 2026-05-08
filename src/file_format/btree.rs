@@ -98,6 +98,76 @@ impl<'t> BTree<'t> {
     pub fn leaf_payloads(&self) -> Result<LeafIterator<'t>> {
         Ok(LeafIterator::new(self.root_page, self.transaction))
     }
+
+    /// Find a row by rowid or the insertion point for a new rowid
+    ///
+    /// Traverses the B-tree to locate:
+    /// - An existing leaf cell with the given rowid (if found)
+    /// - The correct leaf page where a new rowid should be inserted
+    ///
+    /// Returns the leaf page number, all parent page numbers from root to leaf,
+    /// and whether the rowid was found.
+    pub fn find_rowid_path(&self, target_rowid: u64) -> Result<(u32, Vec<u32>, bool)> {
+        let mut parent_pages = vec![self.root_page];
+        let mut current_page_num = self.root_page;
+        let mut rowid_found = false;
+
+        loop {
+            let page_ref = self.transaction.page(current_page_num)?;
+            let page_type = page_ref.page_type()?;
+
+            match page_type {
+                PageType::TableLeaf | PageType::IndexLeaf => {
+                    // Reached a leaf page - check if rowid exists
+                    let raw_cells = page_ref.raw_cells()?;
+                    for cell_bytes in raw_cells {
+                        // Parse leaf cell: varint(payload_len) + varint(rowid) + payload
+                        if let Ok((_, mut offset)) = read_varint(cell_bytes) {
+                            if let Ok((rowid, _)) = read_varint(&cell_bytes[offset..]) {
+                                if rowid == target_rowid {
+                                    rowid_found = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // Return leaf page and parent path
+                    return Ok((current_page_num, parent_pages, rowid_found));
+                }
+                PageType::TableInterior | PageType::IndexInterior => {
+                    // Interior page - find the child to follow
+                    let mut next_child = None;
+
+                    if let Some(interior_iter) = page_ref.as_interior_cells()? {
+                        for cell_result in interior_iter {
+                            if let Ok(interior_cell) = cell_result {
+                                if let Ok(cell_key) = interior_cell.key() {
+                                    let child_ptr = interior_cell.child_pointer();
+
+                                    // If target_rowid <= cell_key, follow this child
+                                    if target_rowid <= cell_key {
+                                        next_child = Some(child_ptr);
+                                        break;
+                                    }
+                                    // Otherwise continue to check next cell (might follow right child)
+                                    next_child = Some(child_ptr);
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(child_page_num) = next_child {
+                        parent_pages.push(child_page_num);
+                        current_page_num = child_page_num;
+                    } else {
+                        return Err(Error::ExecutionError(
+                            "No child found in interior page".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Iterator over leaf cell payloads in a B-tree
