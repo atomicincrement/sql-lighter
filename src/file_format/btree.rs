@@ -175,16 +175,19 @@ impl<'t> BTree<'t> {
 ///
 /// Recursively traverses a B-tree and yields binary encoded record payloads
 /// for all leaf cells. Uses a stack-based traversal to handle multi-level trees.
+/// Fetches cells on-demand using page headers for efficient memory usage.
 pub struct LeafIterator<'t> {
     /// Stack of pages to visit: (page_num, is_processed)
     /// is_processed indicates if we've already yielded all children
     pages_to_visit: Vec<(u32, bool)>,
     /// Reference to transaction for page access
     transaction: &'t Transaction,
-    /// Current page cells being iterated
-    current_cells: Vec<Vec<u8>>,
-    /// Current cell index in current_cells
-    current_cell_index: usize,
+    /// Current page number being iterated
+    current_page_num: u32,
+    /// Current cell index within the current page
+    current_cell_index: u16,
+    /// Total cells in the current page
+    current_cell_count: u16,
 }
 
 impl<'t> LeafIterator<'t> {
@@ -193,37 +196,49 @@ impl<'t> LeafIterator<'t> {
         Self {
             pages_to_visit: vec![(root_page, false)],
             transaction,
-            current_cells: Vec::new(),
+            current_page_num: 0,
             current_cell_index: 0,
+            current_cell_count: 0,
         }
     }
 
-    /// Load all leaf cells from a leaf page into current_cells
-    fn load_leaf_cells(&mut self, page_num: u32) -> Result<()> {
+    /// Fetch a cell from a leaf page by index, returning raw cell bytes
+    /// 
+    /// Uses the page header to locate the cell pointer, then reads the cell
+    /// data directly from the page buffer without allocating intermediate structures.
+    fn fetch_leaf_cell_bytes(&self, page_num: u32, cell_index: u16) -> Result<Vec<u8>> {
         let page_ref = self.transaction.page(page_num)?;
-        let page_type = page_ref.page_type()?;
-
-        match page_type {
-            PageType::TableLeaf | PageType::IndexLeaf => {
-                // Get leaf cells iterator for zero-copy access
-                if let Some(leaf_iter) = page_ref.as_leaf_cells()? {
-                    // Convert to owned Vec<Vec<u8>> using iterator and as_bytes()
-                    self.current_cells = leaf_iter
-                        .filter_map(|result| result.ok())
-                        .map(|cell_ref| cell_ref.as_bytes().to_vec())
-                        .collect();
-                    self.current_cell_index = 0;
-                    Ok(())
-                } else {
-                    Err(Error::ExecutionError(
-                        "as_leaf_cells() returned None for leaf page".to_string(),
-                    ))
-                }
-            }
-            _ => Err(Error::ExecutionError(
-                "Expected leaf page in LeafIterator".to_string(),
-            )),
+        
+        // Get page header to validate cell index
+        let header = page_ref.header()?;
+        if cell_index >= header.cell_count() {
+            return Err(Error::ParseError("Cell index out of bounds".into()));
         }
+
+        // Get raw cell bytes from the page
+        let raw_cells = page_ref.raw_cells()?;
+        
+        // Find the cell by its index
+        if cell_index as usize >= raw_cells.len() {
+            return Err(Error::ParseError("Cell index beyond available cells".into()));
+        }
+
+        Ok(raw_cells[cell_index as usize].to_vec())
+    }
+
+    /// Load cell metadata from a leaf page (count of cells)
+    /// 
+    /// Returns the number of cells in the page so the iterator knows
+    /// how many cells to process.
+    fn load_leaf_page_metadata(&mut self, page_num: u32) -> Result<()> {
+        let page_ref = self.transaction.page(page_num)?;
+        let header = page_ref.header()?;
+        
+        self.current_page_num = page_num;
+        self.current_cell_index = 0;
+        self.current_cell_count = header.cell_count();
+        
+        Ok(())
     }
 
     /// Process an interior page to add its children to the stack
@@ -261,17 +276,23 @@ impl<'t> Iterator for LeafIterator<'t> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            // If we have cells from current page, yield the next one
-            if self.current_cell_index < self.current_cells.len() {
-                let cell_bytes = self.current_cells[self.current_cell_index].clone();
+            // If we have cells in the current page, fetch the next one
+            if self.current_cell_index < self.current_cell_count {
+                let cell_bytes = match self.fetch_leaf_cell_bytes(self.current_page_num, self.current_cell_index) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        self.current_cell_index = self.current_cell_count; // Skip to next page
+                        return Some(Err(e));
+                    }
+                };
                 self.current_cell_index += 1;
-                
-                // Parse the leaf cell inline to extract the payload
+
+                // Parse the leaf cell to extract the payload
                 // Cell format: varint(payload_len) + varint(rowid) + payload
                 if cell_bytes.is_empty() {
                     return Some(Err(Error::ParseError("Empty leaf cell".into())));
                 }
-                
+
                 match read_varint(&cell_bytes) {
                     Ok((payload_len, mut offset)) => {
                         match read_varint(&cell_bytes[offset..]) {
@@ -297,15 +318,13 @@ impl<'t> Iterator for LeafIterator<'t> {
                     match self.transaction.page(page_num) {
                         Ok(page_ref) => {
                             match page_ref.page_type() {
-                                Ok(PageType::TableLeaf)
-                                | Ok(PageType::IndexLeaf) => {
-                                    // Load leaf cells
-                                    if let Err(e) = self.load_leaf_cells(page_num) {
+                                Ok(PageType::TableLeaf) | Ok(PageType::IndexLeaf) => {
+                                    // Load leaf page metadata and continue to yield cells
+                                    if let Err(e) = self.load_leaf_page_metadata(page_num) {
                                         return Some(Err(e));
                                     }
                                 }
-                                Ok(PageType::TableInterior)
-                                | Ok(PageType::IndexInterior) => {
+                                Ok(PageType::TableInterior) | Ok(PageType::IndexInterior) => {
                                     // Process interior page to add children
                                     if let Err(e) = self.process_interior_page(page_num) {
                                         return Some(Err(e));
