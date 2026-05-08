@@ -12,6 +12,7 @@ use crate::types::Value;
 use crate::params::Params;
 use crate::file_format::{DatabaseFile, PageType};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Database connection - main API entry point
 /// 
@@ -478,6 +479,185 @@ mod tests {
             (1i32,),
         )?;
         
+        Ok(())
+    }
+}
+
+/// Simplified database connection (Phase 8b: Multithreading support)
+/// 
+/// Contains only a shared reference to the database file. Transactions are
+/// created from this connection and handle the execution context separately.
+pub struct Connection2 {
+    /// Shared reference to the database file
+    db_file: Arc<DatabaseFile>,
+}
+
+impl Connection2 {
+    /// Open a connection to a database file for reading and writing
+    ///
+    /// Creates a shareable connection that can be used to start transactions.
+    /// The database file is wrapped in Arc for shared ownership.
+    pub fn open(path: &str) -> Result<Self> {
+        let db_file = DatabaseFile::open(path)?;
+        Ok(Self {
+            db_file: Arc::new(db_file),
+        })
+    }
+
+    /// Create a new transaction from this connection
+    ///
+    /// Returns a Transaction that can execute queries and track page modifications.
+    pub fn transaction(&self) -> Result<Transaction> {
+        Transaction::new(Arc::clone(&self.db_file))
+    }
+}
+
+/// Transaction context for query execution (Phase 8b: Transaction support)
+///
+/// Represents a single transaction session where queries are executed.
+/// Tracks all page modifications made during the transaction in a write-ahead log.
+pub struct Transaction {
+    /// Shared reference to the database file
+    _db_file: Arc<DatabaseFile>,
+    /// Virtual machine for query execution
+    vm: VirtualMachine,
+    /// Pages modified during this transaction: page_num -> bytes
+    /// This tracks all writes that need to be persisted when the transaction commits
+    modified_pages: HashMap<u32, Box<[u8]>>,
+}
+
+impl Transaction {
+    /// Create a new transaction
+    fn new(db_file: Arc<DatabaseFile>) -> Result<Self> {
+        Ok(Self {
+            _db_file: db_file,
+            vm: VirtualMachine::new(),
+            modified_pages: HashMap::new(),
+        })
+    }
+
+    /// Execute a SQL statement within this transaction
+    ///
+    /// Queries are executed against the virtual machine's table storage.
+    /// Write operations track modified pages for later persistence.
+    pub fn execute<P: Params>(&mut self, sql: &str, params: P) -> Result<ExecutionResult> {
+        // Bind parameters
+        let param_map = params.bind_params()?;
+        
+        // Parse SQL with parameter substitution
+        let processed_sql = self.substitute_parameters(sql, &param_map)?;
+        
+        // Parse
+        let mut parser = Parser::new(&processed_sql)?;
+        let stmt = parser.parse_statement()?;
+
+        // Plan
+        let planner = Planner::new();
+        let plan = planner.plan(&stmt)?;
+
+        // Execute
+        let result_set = self.vm.execute(&plan)?;
+
+        // For write operations, track that pages were modified
+        // (actual page serialization happens during commit)
+        if self.is_write_operation(&plan) {
+            let tables = self.vm.get_all_tables();
+            for (_table_name, table_storage) in tables {
+                // Mark this page as needing to be persisted
+                // The actual bytes will be serialized during commit
+                self.modified_pages.insert(table_storage.page_num, Box::new([]));
+            }
+        }
+
+        Ok(ExecutionResult {
+            rows: result_set.rows.clone(),
+            columns: result_set.columns.clone(),
+        })
+    }
+
+    /// Check if an execution plan modifies data
+    fn is_write_operation(&self, plan: &ExecutionPlan) -> bool {
+        matches!(
+            plan,
+            ExecutionPlan::Insert { .. }
+                | ExecutionPlan::Update { .. }
+                | ExecutionPlan::Delete { .. }
+                | ExecutionPlan::CreateTable { .. }
+                | ExecutionPlan::CreateIndex { .. }
+                | ExecutionPlan::DropIndex { .. }
+        )
+    }
+
+    /// Substitute ?1, ?2, etc parameters in SQL
+    fn substitute_parameters(&self, sql: &str, params: &HashMap<String, Value>) -> Result<String> {
+        let mut result = String::new();
+        let mut chars = sql.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '?' {
+                // Found a parameter placeholder, collect the number
+                let mut num_str = String::new();
+                while let Some(&next_ch) = chars.peek() {
+                    if next_ch.is_ascii_digit() {
+                        num_str.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+
+                if num_str.is_empty() {
+                    return Err(Error::ParseError("Parameter index expected after ?".to_string()));
+                }
+
+                if let Some(value) = params.get(&num_str) {
+                    // Substitute parameter value
+                    match value {
+                        Value::Integer(i) => result.push_str(&i.to_string()),
+                        Value::Real(f) => result.push_str(&f.to_string()),
+                        Value::Text(s) => {
+                            result.push('\'');
+                            result.push_str(&s.replace('\'', "''"));
+                            result.push('\'');
+                        }
+                        Value::Null => result.push_str("NULL"),
+                        Value::Blob(_) => {
+                            return Err(Error::ExecutionError(
+                                "Blob parameters not yet supported".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    return Err(Error::InvalidParameterCount(params.len(), num_str.parse::<usize>().unwrap_or(0) + 1));
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Get the modified pages from this transaction
+    pub fn modified_pages(&self) -> &HashMap<u32, Box<[u8]>> {
+        &self.modified_pages
+    }
+
+    /// Commit the transaction (placeholder for now)
+    ///
+    /// In a full implementation, this would:
+    /// 1. Serialize modified pages into modified_pages HashMap
+    /// 2. Write changes to the database file
+    /// 3. Flush to disk
+    pub fn commit(&self) -> Result<()> {
+        // TODO: Implement commit logic
+        Ok(())
+    }
+
+    /// Rollback the transaction (placeholder for now)
+    ///
+    /// Discards all changes made during this transaction.
+    pub fn rollback(&self) -> Result<()> {
+        // TODO: Implement rollback logic
         Ok(())
     }
 }
